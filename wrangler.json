@@ -11,13 +11,15 @@
 	"d1_databases": [
 		{
 			"binding": "adaptive_cards",
-			"database_name": "adaptive-cards"
+			"database_name": "adaptive-cards",
+			"remote": true
 		}
 	],
 	"r2_buckets": [
 		{
 			"binding": "adaptive_card_variables",
-			"bucket_name": "adaptive-card-variables"
+			"bucket_name": "adaptive-card-variables",
+			"remote": true
 		}
 	],
 	"assets": {

@@ -74,13 +74,49 @@ function bindString(value: string, data: Record<string, unknown>) {
 	});
 }
 
+function getDataContext(value: unknown) {
+	if (isObject(value)) {
+		return value;
+	}
+
+	return {
+		value,
+	};
+}
+
+function expandDataTemplate(item: Record<string, unknown>, data: Record<string, unknown>) {
+	if (typeof item.$data !== "string") {
+		return undefined;
+	}
+
+	const source = bindString(item.$data, data);
+	if (!Array.isArray(source)) {
+		return undefined;
+	}
+
+	const template = { ...item };
+	delete template.$data;
+
+	return source.map((value) => bindData(template, { ...data, ...getDataContext(value) }));
+}
+
 function bindData(value: unknown, data: Record<string, unknown>): unknown {
 	if (typeof value === "string") {
 		return bindString(value, data);
 	}
 
 	if (Array.isArray(value)) {
-		return value.map((item) => bindData(item, data));
+		return value.flatMap((item) => {
+			if (isObject(item) && "$data" in item) {
+				const expandedItems = expandDataTemplate(item, data);
+
+				if (expandedItems) {
+					return expandedItems;
+				}
+			}
+
+			return [bindData(item, data)];
+		});
 	}
 
 	if (isObject(value)) {
@@ -371,7 +407,7 @@ async function getCard(c: AppContext) {
 	} catch {
 		return c.json(
 			{
-				error: "Failed to load card",
+				error: "Failed to load card. Verify the local D1 database has a cards table with payload and data columns.",
 			},
 			500,
 		);

@@ -50,15 +50,24 @@ function getCardNameFromUrl() {
 function App() {
   const [cardName] = useState(getCardNameFromUrl);
   const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [renderedCard, setRenderedCard] = useState<HTMLElement | null>(null);
   const cardContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     async function loadCard() {
       setError(null);
+      setIsLoading(true);
       setRenderedCard(null);
 
-      const response = await fetch(`/api/${encodeURIComponent(cardName)}`);
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 10_000);
+
+      const response = await fetch(`/api/${encodeURIComponent(cardName)}`, {
+        signal: controller.signal,
+      });
+      window.clearTimeout(timeout);
+
       const data = (await response.json()) as CardResponse;
       if (!response.ok) {
         throw new Error(data.error ?? `Failed to load adaptive card "${cardName}"`);
@@ -92,9 +101,16 @@ function App() {
       }
 
       setRenderedCard(renderedCard);
+      setIsLoading(false);
     }
 
     loadCard().catch((error: unknown) => {
+      setIsLoading(false);
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setError("Timed out loading the adaptive card API");
+        return;
+      }
+
       setError(error instanceof Error ? error.message : "Failed to load adaptive card");
     });
   }, [cardName]);
@@ -117,6 +133,7 @@ function App() {
     <main>
       <h1>Adaptive Card</h1>
       <p className="source">Search term: {cardName}</p>
+      {isLoading && <p className="source">Loading card...</p>}
       {error && <p role="alert">{error}</p>}
       <div ref={cardContainerRef} id="adaptive-card" />
     </main>
