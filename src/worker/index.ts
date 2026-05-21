@@ -6,11 +6,28 @@ type Bindings = Env & {
 };
 
 type CardRow = {
+	data: string | null;
 	payload: string;
 };
 
+type BindingSpec =
+	| {
+			key: string;
+			name: string;
+			type: "r2";
+	  }
+	| {
+			name: string;
+			query: string;
+			type: "d1";
+	  };
+
 const App = new Hono<{ Bindings: Bindings }>();
 type AppContext = Context<{ Bindings: Bindings }>;
+const bindingPattern = /\$\{([A-Za-z0-9_.-]+)\}/g;
+const maxBindingsPerCard = 50;
+const maxBindingBytes = 256 * 1024;
+const maxQueryRows = 100;
 
 function parseMaybeJson(value: unknown) {
 	if (typeof value !== "string") {
@@ -50,7 +67,7 @@ function bindString(value: string, data: Record<string, unknown>) {
 		return replacement === undefined || replacement === null ? "" : replacement;
 	}
 
-	return value.replace(/\$\{([A-Za-z0-9_.-]+)\}/g, (_match, path: string) => {
+	return value.replace(bindingPattern, (_match, path: string) => {
 		const replacement = getPathValue(data, path);
 
 		return replacement === undefined || replacement === null ? "" : String(replacement);
@@ -75,28 +92,151 @@ function bindData(value: unknown, data: Record<string, unknown>): unknown {
 	return value;
 }
 
-async function getBindingData(bucket: R2Bucket | undefined, cardName: string) {
-	if (!bucket) {
-		return {};
+function isSafeBindingName(value: string) {
+	return /^[A-Za-z0-9_.-]{1,128}$/.test(value);
+}
+
+function getR2BindingName(key: string) {
+	return key.endsWith(".json") ? key.slice(0, -".json".length) : key;
+}
+
+async function getR2BindingValue(bucket: R2Bucket, bindingName: string) {
+	const object = await bucket.get(bindingName);
+	if (!object || object.size > maxBindingBytes) {
+		return undefined;
 	}
 
-	const keys = [`${cardName}.json`, cardName];
+	const text = await object.text();
 
-	for (const key of keys) {
-		const object = await bucket.get(key);
-		if (!object) {
-			continue;
-		}
+	return parseMaybeJson(text);
+}
 
-		const data = parseMaybeJson(await object.text());
-		if (!isObject(data)) {
-			return {};
-		}
+function isSafeReadQuery(query: string) {
+	const normalizedQuery = query.trim().toLowerCase();
 
-		return data;
+	return (
+		(normalizedQuery.startsWith("select ") || normalizedQuery.startsWith("with ")) &&
+		!normalizedQuery.includes(";") &&
+		!normalizedQuery.includes("--") &&
+		!normalizedQuery.includes("/*") &&
+		!/\b(insert|update|delete|drop|alter|create|replace|pragma|attach|detach|vacuum)\b/.test(
+			normalizedQuery,
+		)
+	);
+}
+
+function shapeQueryResult(rows: Record<string, unknown>[]) {
+	if (rows.length !== 1) {
+		return rows;
 	}
 
-	return {};
+	const row = rows[0];
+	const values = Object.values(row);
+
+	return values.length === 1 ? parseMaybeJson(values[0]) : row;
+}
+
+async function getD1BindingValue(db: D1Database, query: string) {
+	if (!isSafeReadQuery(query)) {
+		return undefined;
+	}
+
+	try {
+		const result = await db.prepare(query).all<Record<string, unknown>>();
+		const rows = result.results ?? [];
+
+		return shapeQueryResult(rows.slice(0, maxQueryRows));
+	} catch {
+		return undefined;
+	}
+}
+
+function getBindingSpecs(dataColumn: unknown): BindingSpec[] {
+	const parsedData = parseMaybeJson(dataColumn);
+
+	if (typeof parsedData === "string") {
+		return isSafeBindingName(parsedData)
+			? [{ key: parsedData, name: getR2BindingName(parsedData), type: "r2" }]
+			: [];
+	}
+
+	if (Array.isArray(parsedData)) {
+		const specs: BindingSpec[] = [];
+
+		for (const value of parsedData) {
+			if (typeof value === "string" && isSafeBindingName(value)) {
+				specs.push({ key: value, name: getR2BindingName(value), type: "r2" });
+				continue;
+			}
+
+			if (!isObject(value)) {
+				continue;
+			}
+
+			for (const [name, query] of Object.entries(value)) {
+				if (typeof query === "string" && isSafeBindingName(name)) {
+					specs.push({ name, query, type: "d1" });
+				}
+			}
+		}
+
+		return specs.slice(0, maxBindingsPerCard);
+	}
+
+	if (isObject(parsedData)) {
+		const bindings = parsedData.bindings ?? parsedData.bindingNames ?? parsedData.data;
+		if (Array.isArray(bindings)) {
+			return getBindingSpecs(bindings);
+		}
+
+		return Object.entries(parsedData)
+			.flatMap(([name, value]): BindingSpec[] => {
+				if (!isSafeBindingName(name)) {
+					return [];
+				}
+
+				if (typeof value === "string" && isSafeReadQuery(value)) {
+					return [{ name, query: value, type: "d1" }];
+				}
+
+				return [{ key: name, name: getR2BindingName(name), type: "r2" }];
+			})
+			.slice(0, maxBindingsPerCard);
+	}
+
+	return [];
+}
+
+async function getBindingData(
+	db: D1Database,
+	bucket: R2Bucket | undefined,
+	bindingSpecs: BindingSpec[],
+) {
+	const data: Record<string, unknown> = {};
+
+	for (const spec of bindingSpecs.slice(0, maxBindingsPerCard)) {
+		if (spec.type === "r2") {
+			if (!bucket) {
+				continue;
+			}
+
+			const value = await getR2BindingValue(bucket, spec.key);
+			if (value === undefined) {
+				continue;
+			}
+
+			data[spec.name] = value;
+		} else {
+			const value = await getD1BindingValue(db, spec.query);
+			if (value === undefined) {
+				continue;
+			}
+
+			data[spec.name] = value;
+		}
+	}
+
+	return data;
 }
 
 function expandCardTemplate(templatePayload: unknown, data: Record<string, unknown>) {
@@ -107,7 +247,7 @@ async function findCardRow(db: D1Database, cardName: string) {
 	return db
 		.prepare(
 			`
-				SELECT payload
+				SELECT payload, data
 				FROM cards
 				WHERE name = ?
 				LIMIT 1
@@ -158,7 +298,8 @@ async function getCard(c: AppContext) {
 				);
 			}
 
-			const data = await getBindingData(variablesBucket, cardName);
+			const bindingSpecs = getBindingSpecs(row.data);
+			const data = await getBindingData(db, variablesBucket, bindingSpecs);
 			const card = expandCardTemplate(templatePayload, data);
 
 			if (!looksLikeCardPayload(card)) {
