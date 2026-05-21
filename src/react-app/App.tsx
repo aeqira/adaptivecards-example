@@ -1,31 +1,51 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as AdaptiveCards from "adaptivecards";
 import "adaptivecards/lib/adaptivecards.css";
+
+type CardResponse = {
+  card?: unknown;
+  error?: string;
+};
 
 function App() {
   const [cardName] = useState("member-payment");
   const [error, setError] = useState<string | null>(null);
+  const cardContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const container = cardContainerRef.current;
+
     async function loadCard() {
+      setError(null);
+      if (container) {
+        container.innerHTML = "";
+      }
+
       const response = await fetch(`/api/${cardName}`);
-      const data = await response.json();
+      const data = (await response.json()) as CardResponse;
       if (!response.ok) {
         throw new Error(data.error ?? `Failed to load adaptive card "${cardName}"`);
       }
 
+      const cardPayload =
+        data.card && typeof data.card === "object" && "card" in data.card
+          ? data.card.card
+          : data.card;
+
+      if (!cardPayload) {
+        throw new Error(`Adaptive card "${cardName}" did not include a card payload`);
+      }
+
       const adaptiveCard = new AdaptiveCards.AdaptiveCard();
 
-      adaptiveCard.parse(data.card);
+      adaptiveCard.parse(cardPayload);
 
       const renderedCard = adaptiveCard.render();
       if (!renderedCard) {
         throw new Error(`Unable to render adaptive card "${cardName}"`);
       }
 
-      const container = document.getElementById("adaptive-card");
       if (container) {
-        container.innerHTML = "";
         container.appendChild(renderedCard);
       }
     }
@@ -39,7 +59,7 @@ function App() {
     <main>
       <h1>Adaptive Card</h1>
       {error && <p role="alert">{error}</p>}
-      <div id="adaptive-card" />
+      <div ref={cardContainerRef} id="adaptive-card" />
     </main>
   );
 }
