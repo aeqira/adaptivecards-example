@@ -1,6 +1,9 @@
 import { Hono } from "hono";
 const app = new Hono<{ Bindings: Env }>();
 
-app.get("/api/", (c) => c.json({ name: "Cloudflare" }));
+app.get("/api/:name", (c) => {
+  const name = c.req.param("name");
+  return c.json({ name });
+});
 
 export default app;
