@@ -1,9 +1,9 @@
 import { Hono } from "hono";
-const app = new Hono<{ Bindings: Env }>();
+const App = new Hono<{ Bindings: Env }>();
 
-app.get("/api/:name", (c) => {
+App.get("/api/:name", (c) => {
   const name = c.req.param("name");
   return c.json({ name });
 });
 
-export default app;
+export default App;
