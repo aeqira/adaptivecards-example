@@ -64,13 +64,13 @@ function bindString(value: string, data: Record<string, unknown>) {
 	if (exactMatch) {
 		const replacement = getPathValue(data, exactMatch[1]);
 
-		return replacement === undefined || replacement === null ? "" : replacement;
+		return replacement === undefined || replacement === null ? value : replacement;
 	}
 
 	return value.replace(bindingPattern, (_match, path: string) => {
 		const replacement = getPathValue(data, path);
 
-		return replacement === undefined || replacement === null ? "" : String(replacement);
+		return replacement === undefined || replacement === null ? `\${${path}}` : String(replacement);
 	});
 }
 
@@ -92,6 +92,34 @@ function bindData(value: unknown, data: Record<string, unknown>): unknown {
 	return value;
 }
 
+function getUnresolvedBindings(value: unknown, missing = new Set<string>()) {
+	if (typeof value === "string") {
+		for (const match of value.matchAll(bindingPattern)) {
+			if (match[0] === value || value.includes(match[0])) {
+				missing.add(match[1]);
+			}
+		}
+
+		return missing;
+	}
+
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			getUnresolvedBindings(item, missing);
+		}
+
+		return missing;
+	}
+
+	if (isObject(value)) {
+		for (const childValue of Object.values(value)) {
+			getUnresolvedBindings(childValue, missing);
+		}
+	}
+
+	return missing;
+}
+
 function isSafeBindingName(value: string) {
 	return /^[A-Za-z0-9_.-]{1,128}$/.test(value);
 }
@@ -109,6 +137,16 @@ async function getR2BindingValue(bucket: R2Bucket, bindingName: string) {
 	const text = await object.text();
 
 	return parseMaybeJson(text);
+}
+
+function normalizeBindingValue(bindingName: string, value: unknown) {
+	const normalizedName = getR2BindingName(bindingName);
+
+	if (isObject(value) && normalizedName in value) {
+		return value[normalizedName];
+	}
+
+	return value;
 }
 
 function isSafeReadQuery(query: string) {
@@ -225,7 +263,7 @@ async function getBindingData(
 				continue;
 			}
 
-			data[spec.name] = value;
+			data[spec.name] = normalizeBindingValue(spec.key, value);
 		} else {
 			const value = await getD1BindingValue(db, spec.query);
 			if (value === undefined) {
@@ -301,6 +339,16 @@ async function getCard(c: AppContext) {
 			const bindingSpecs = getBindingSpecs(row.data);
 			const data = await getBindingData(db, variablesBucket, bindingSpecs);
 			const card = expandCardTemplate(templatePayload, data);
+			const unresolvedBindings = Array.from(getUnresolvedBindings(card));
+
+			if (unresolvedBindings.length > 0) {
+				return c.json(
+					{
+						error: `Missing data bindings: ${unresolvedBindings.join(", ")}`,
+					},
+					422,
+				);
+			}
 
 			if (!looksLikeCardPayload(card)) {
 				return c.json(
