@@ -2,10 +2,8 @@
 	font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
 	line-height: 1.5;
 	font-weight: 400;
-
-	color-scheme: light dark;
-	color: rgba(255, 255, 255, 0.87);
-	background-color: #242424;
+	color: #172033;
+	background-color: #f5f7fb;
 
 	font-synthesis: none;
 	text-rendering: optimizeLegibility;
@@ -24,15 +22,14 @@ a:hover {
 
 body {
 	margin: 0;
-	display: flex;
-	place-items: center;
 	min-width: 320px;
 	min-height: 100vh;
 }
 
 h1 {
-	font-size: 3.2em;
+	font-size: 2rem;
 	line-height: 1.1;
+	margin: 0 0 1rem;
 }
 
 button {
@@ -54,15 +51,31 @@ button:focus-visible {
 	outline: 4px auto -webkit-focus-ring-color;
 }
 
-@media (prefers-color-scheme: light) {
-	:root {
-		color: #213547;
-		background-color: #ffffff;
-	}
-	a:hover {
-		color: #747bff;
-	}
-	button {
-		background-color: #f9f9f9;
-	}
+main {
+	width: min(100% - 2rem, 760px);
+	margin: 0 auto;
+	padding: 2rem 0;
+}
+
+[role="alert"] {
+	color: #8a1f11;
+	background: #fff2ef;
+	border: 1px solid #ffd0c6;
+	border-radius: 8px;
+	padding: 0.75rem 1rem;
+	text-align: left;
+}
+
+.source {
+	color: #5f6b7a;
+	font-size: 0.875rem;
+	margin: -0.5rem 0 1rem;
+}
+
+#adaptive-card {
+	background: #ffffff;
+	border: 1px solid #d8dee8;
+	border-radius: 8px;
+	padding: 1rem;
+	text-align: left;
 }

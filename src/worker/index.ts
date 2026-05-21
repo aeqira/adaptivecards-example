@@ -6,6 +6,10 @@ type Bindings = Env & {
 
 const App = new Hono<{ Bindings: Bindings }>();
 
+function getFileName(key: string) {
+	return key.split("/").at(-1) ?? key;
+}
+
 App.get("/api/:cardName", async (c) => {
 	const cardName = c.req.param("cardName");
 	const bucket = c.env.adaptive_cards;
@@ -32,10 +36,33 @@ App.get("/api/:cardName", async (c) => {
 	}
 
 	if (!cardObject) {
+		const listedObjects = await bucket.list({ limit: 100 });
+		const availableKeys = listedObjects.objects.map((object) => object.key);
+		const discoveredKey = availableKeys.find((key) => {
+			const fileName = getFileName(key);
+
+			return (
+				key === cardName ||
+				key === `${cardName}.json` ||
+				fileName === cardName ||
+				fileName === `${cardName}.json`
+			);
+		});
+
+		if (discoveredKey) {
+			cardObject = await bucket.get(discoveredKey);
+			objectKey = discoveredKey;
+		}
+	}
+
+	if (!cardObject) {
+		const listedObjects = await bucket.list({ limit: 25 });
+
 		return c.json(
 			{
 				error: `Card "${cardName}" was not found`,
 				checkedKeys: objectKeys,
+				availableKeys: listedObjects.objects.map((object) => object.key),
 			},
 			404,
 		);
