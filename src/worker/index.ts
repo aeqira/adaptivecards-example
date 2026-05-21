@@ -4,43 +4,12 @@ type Bindings = Env & {
 	adaptive_cards: D1Database;
 };
 
-type TableRow = Record<string, unknown>;
-type SchemaColumn = {
-	name: string;
+type CardRow = {
+	payload: string;
 };
 
 const App = new Hono<{ Bindings: Bindings }>();
 type AppContext = Context<{ Bindings: Bindings }>;
-
-const identityColumns = [
-	"id",
-	"key",
-	"name",
-	"slug",
-	"title",
-	"filename",
-	"card_name",
-	"cardName",
-	"card_id",
-	"cardId",
-];
-
-const cardColumns = [
-	"card",
-	"adaptive_card",
-	"adaptiveCard",
-	"template",
-	"payload",
-	"content",
-	"json",
-	"value",
-	"data",
-	"body",
-];
-
-function quoteIdentifier(identifier: string) {
-	return `"${identifier.replaceAll(`"`, `""`)}"`;
-}
 
 function parseMaybeJson(value: unknown) {
 	if (typeof value !== "string") {
@@ -54,7 +23,7 @@ function parseMaybeJson(value: unknown) {
 	}
 }
 
-function isObject(value: unknown): value is TableRow {
+function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -62,56 +31,18 @@ function looksLikeCardPayload(value: unknown) {
 	return isObject(value) && ("type" in value || "body" in value || "actions" in value);
 }
 
-function extractCard(row: TableRow) {
-	for (const column of cardColumns) {
-		if (!(column in row)) {
-			continue;
-		}
-
-		const value = parseMaybeJson(row[column]);
-		if (looksLikeCardPayload(value)) {
-			return value;
-		}
-	}
-
-	for (const value of Object.values(row)) {
-		const parsedValue = parseMaybeJson(value);
-		if (looksLikeCardPayload(parsedValue)) {
-			return parsedValue;
-		}
-	}
-
-	return row;
-}
-
-async function getColumns(db: D1Database, tableName: string) {
-	try {
-		const result = await db
-			.prepare(`PRAGMA table_info(${quoteIdentifier(tableName)})`)
-			.all<SchemaColumn>();
-
-		return result.results ?? [];
-	} catch {
-		return [];
-	}
-}
-
-async function findCardRow(db: D1Database, tableName: string, columns: string[], cardName: string) {
-	const searchableColumns = columns.filter((column) => identityColumns.includes(column));
-
-	if (searchableColumns.length === 0) {
-		return null;
-	}
-
-	const whereClause = searchableColumns
-		.map((column) => `${quoteIdentifier(column)} IN (?, ?)`)
-		.join(" OR ");
-	const params = searchableColumns.flatMap(() => [cardName, `${cardName}.json`]);
-
+async function findCardRow(db: D1Database, cardName: string) {
 	return db
-		.prepare(`SELECT * FROM ${quoteIdentifier(tableName)} WHERE ${whereClause} LIMIT 1`)
-		.bind(...params)
-		.first<TableRow>();
+		.prepare(
+			`
+				SELECT payload
+				FROM cards
+				WHERE name = ?
+				LIMIT 1
+			`,
+		)
+		.bind(cardName)
+		.first<CardRow>();
 }
 
 function getCardNameFromRequest(c: AppContext) {
@@ -132,40 +63,41 @@ async function getCard(c: AppContext) {
 		return c.json({ error: "Missing card search term" }, 400);
 	}
 
-	if (!db) {
-		return c.json({ error: "D1 binding \"adaptive_cards\" is not configured" }, 500);
+	if (cardName.length > 128) {
+		return c.json({ error: "Card search term is too long" }, 400);
 	}
 
-	const checkedTables: Array<{ table: string; columns: string[] }> = [];
+	if (!db) {
+		return c.json({ error: "Card database is not configured" }, 500);
+	}
 
 	try {
-		const tableName = "cards";
-		const columns = (await getColumns(db, tableName)).map((column) => column.name);
-		checkedTables.push({ table: tableName, columns });
-
-		const row = await findCardRow(db, tableName, columns, cardName);
+		const row = await findCardRow(db, cardName);
 		if (row) {
-			return c.json({
-				card: extractCard(row),
-				source: {
-					table: tableName,
-					columns,
-				},
-			});
+			const card = parseMaybeJson(row.payload);
+
+			if (!looksLikeCardPayload(card)) {
+				return c.json(
+					{
+						error: "Stored card payload is not a valid Adaptive Card JSON payload",
+					},
+					422,
+				);
+			}
+
+			return c.json({ card });
 		}
 
 		return c.json(
 			{
-				error: `Card "${cardName}" was not found in D1`,
-				checkedTables,
+				error: "Card was not found",
 			},
 			404,
 		);
-	} catch (error) {
+	} catch {
 		return c.json(
 			{
-				error: error instanceof Error ? error.message : "Failed to query D1",
-				checkedTables,
+				error: "Failed to load card",
 			},
 			500,
 		);
