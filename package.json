@@ -14,12 +14,12 @@
 	"dependencies": {
 		"adaptivecards": "^3.0.6",
 		"adaptivecards-templating": "^2.3.1",
-		"hono": "4.11.1",
+		"hono": "4.12.18",
 		"react": "19.2.1",
 		"react-dom": "19.2.1"
 	},
 	"devDependencies": {
-		"@cloudflare/vite-plugin": "1.15.3",
+		"@cloudflare/vite-plugin": "1.37.2",
 		"@eslint/js": "9.39.1",
 		"@types/node": "24.10.1",
 		"@types/react": "19.2.7",
@@ -32,7 +32,7 @@
 		"typescript": "5.8.3",
 		"typescript-eslint": "8.48.0",
 		"vite": "^6.0.0",
-		"wrangler": "4.56.0"
+		"wrangler": "4.93.0"
 	},
 	"private": true,
 	"scripts": {
