@@ -8,6 +8,12 @@
 		"enabled": true
 	},
 	"upload_source_maps": true,
+	"r2_buckets": [
+		{
+			"binding": "adaptive_cards",
+			"bucket_name": "adaptive-card-variables"
+		}
+	],
 	"assets": {
 		"directory": "./dist/client",
 		"not_found_handling": "single-page-application"

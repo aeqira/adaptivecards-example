@@ -1,20 +1,22 @@
 import { Hono } from "hono";
 
-const App = new Hono<{ Bindings: Env }>();
+type Bindings = Env & {
+	adaptive_cards: R2Bucket;
+};
+
+const App = new Hono<{ Bindings: Bindings }>();
 
 App.get("/api/:cardName", async (c) => {
-  const cardName = c.req.param("cardName");
+	const cardName = c.req.param("cardName");
 
-  const stateFile = await c.env.adaptive_cards.get("states.json");
-  const cardFile = await c.env.adaptive_cards.get(`${cardName}.json`);
+	const cardObject = await c.env.adaptive_cards.get(`${cardName}.json`);
+	if (!cardObject) {
+		return c.json({ error: `Card "${cardName}" was not found` }, 404);
+	}
 
-  const states = await stateFile?.json();
-  const card = await cardFile?.json();
+	const card = JSON.parse(await cardObject.text());
 
-  return c.json({
-    states,
-    card,
-  });
+	return c.json({ card });
 });
 
 export default App;

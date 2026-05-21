@@ -12,6 +12,7 @@
 		"publish": true
 	},
 	"dependencies": {
+		"adaptivecards": "^3.0.6",
 		"adaptivecards-templating": "^2.3.1",
 		"hono": "4.11.1",
 		"react": "19.2.1",

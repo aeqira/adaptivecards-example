@@ -1,65 +1,38 @@
-// src/App.tsx
-
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import viteLogo from "/vite.svg";
-import cloudflareLogo from "./assets/Cloudflare_Logo.svg";
-import honoLogo from "./assets/hono.svg";
-import "./App.css";
+import { useEffect, useState } from "react";
+import * as AdaptiveCards from "adaptivecards";
 
 function App() {
-  const [count, setCount] = useState(0);
-  const [name, setName] = useState("unknown");
+  const [cardName] = useState("member-payment");
+
+  useEffect(() => {
+    async function loadCard() {
+      const response = await fetch(`/api/${cardName}`);
+      const data = await response.json();
+
+      const adaptiveCard = new AdaptiveCards.AdaptiveCard();
+
+      adaptiveCard.parse(data.card);
+
+      const renderedCard = adaptiveCard.render();
+      if (!renderedCard) {
+        throw new Error(`Unable to render adaptive card "${cardName}"`);
+      }
+
+      const container = document.getElementById("adaptive-card");
+      if (container) {
+        container.innerHTML = "";
+        container.appendChild(renderedCard);
+      }
+    }
+
+    loadCard();
+  }, [cardName]);
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-        <a href="https://hono.dev/" target="_blank">
-          <img src={honoLogo} className="logo cloudflare" alt="Hono logo" />
-        </a>
-        <a href="https://workers.cloudflare.com/" target="_blank">
-          <img
-            src={cloudflareLogo}
-            className="logo cloudflare"
-            alt="Cloudflare logo"
-          />
-        </a>
-      </div>
-      <h1>Vite + React + Hono + Cloudflare</h1>
-      <div className="card">
-        <button
-          onClick={() => setCount((count) => count + 1)}
-          aria-label="increment"
-        >
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <div className="card">
-        <button
-          onClick={() => {
-            fetch("/api/:name", { method: "POST", body: name })
-              .then((res) => res.json() as Promise<{ name: string }>)
-              .then((data) => setName(data.name));
-          }}
-          aria-label="get name"
-        >
-          Name from API is: {name}
-        </button>
-        <p>
-          Edit <code>worker/index.ts</code> to change the name
-        </p>
-      </div>
-      <p className="read-the-docs">Click on the logos to learn more</p>
-    </>
+    <main>
+      <h1>Adaptive Card</h1>
+      <div id="adaptive-card" />
+    </main>
   );
 }
 
