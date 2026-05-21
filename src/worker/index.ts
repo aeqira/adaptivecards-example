@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 
 type Bindings = Env & {
 	adaptive_cards: D1Database;
+	adaptive_card_variables: R2Bucket;
 };
 
 type CardRow = {
@@ -31,6 +32,77 @@ function looksLikeCardPayload(value: unknown) {
 	return isObject(value) && ("type" in value || "body" in value || "actions" in value);
 }
 
+function getPathValue(source: Record<string, unknown>, path: string) {
+	return path.split(".").reduce<unknown>((current, segment) => {
+		if (!isObject(current)) {
+			return undefined;
+		}
+
+		return current[segment];
+	}, source);
+}
+
+function bindString(value: string, data: Record<string, unknown>) {
+	const exactMatch = value.match(/^\$\{([A-Za-z0-9_.-]+)\}$/);
+	if (exactMatch) {
+		const replacement = getPathValue(data, exactMatch[1]);
+
+		return replacement === undefined || replacement === null ? "" : replacement;
+	}
+
+	return value.replace(/\$\{([A-Za-z0-9_.-]+)\}/g, (_match, path: string) => {
+		const replacement = getPathValue(data, path);
+
+		return replacement === undefined || replacement === null ? "" : String(replacement);
+	});
+}
+
+function bindData(value: unknown, data: Record<string, unknown>): unknown {
+	if (typeof value === "string") {
+		return bindString(value, data);
+	}
+
+	if (Array.isArray(value)) {
+		return value.map((item) => bindData(item, data));
+	}
+
+	if (isObject(value)) {
+		return Object.fromEntries(
+			Object.entries(value).map(([key, childValue]) => [key, bindData(childValue, data)]),
+		);
+	}
+
+	return value;
+}
+
+async function getBindingData(bucket: R2Bucket | undefined, cardName: string) {
+	if (!bucket) {
+		return {};
+	}
+
+	const keys = [`${cardName}.json`, cardName];
+
+	for (const key of keys) {
+		const object = await bucket.get(key);
+		if (!object) {
+			continue;
+		}
+
+		const data = parseMaybeJson(await object.text());
+		if (!isObject(data)) {
+			return {};
+		}
+
+		return data;
+	}
+
+	return {};
+}
+
+function expandCardTemplate(templatePayload: unknown, data: Record<string, unknown>) {
+	return bindData(templatePayload, data);
+}
+
 async function findCardRow(db: D1Database, cardName: string) {
 	return db
 		.prepare(
@@ -58,6 +130,7 @@ function getCardNameFromRequest(c: AppContext) {
 async function getCard(c: AppContext) {
 	const cardName = getCardNameFromRequest(c);
 	const db = c.env.adaptive_cards;
+	const variablesBucket = c.env.adaptive_card_variables;
 
 	if (!cardName) {
 		return c.json({ error: "Missing card search term" }, 400);
@@ -74,12 +147,24 @@ async function getCard(c: AppContext) {
 	try {
 		const row = await findCardRow(db, cardName);
 		if (row) {
-			const card = parseMaybeJson(row.payload);
+			const templatePayload = parseMaybeJson(row.payload);
+
+			if (!looksLikeCardPayload(templatePayload)) {
+				return c.json(
+					{
+						error: "Stored card payload is not a valid Adaptive Card JSON payload",
+					},
+					422,
+				);
+			}
+
+			const data = await getBindingData(variablesBucket, cardName);
+			const card = expandCardTemplate(templatePayload, data);
 
 			if (!looksLikeCardPayload(card)) {
 				return c.json(
 					{
-						error: "Stored card payload is not a valid Adaptive Card JSON payload",
+						error: "Expanded card payload is not a valid Adaptive Card JSON payload",
 					},
 					422,
 				);

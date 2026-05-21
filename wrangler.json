@@ -14,6 +14,12 @@
 			"database_name": "adaptive-cards"
 		}
 	],
+	"r2_buckets": [
+		{
+			"binding": "adaptive_card_variables",
+			"bucket_name": "adaptive-card-variables"
+		}
+	],
 	"assets": {
 		"directory": "./dist/client",
 		"not_found_handling": "single-page-application"
