@@ -23,29 +23,79 @@ function getDataContext(source: JsonObject): JsonObject {
   return isObject(data) ? data : {};
 }
 
+function looksLikeAdaptiveCard(value: JsonObject) {
+  return value.type === "AdaptiveCard" || "body" in value || "actions" in value;
+}
+
+function normalizeAdaptiveCard(value: JsonObject): JsonObject {
+  return {
+    type: "AdaptiveCard",
+    version: "1.5",
+    ...value,
+  };
+}
+
+function findAdaptiveCardPayload(payload: unknown, visited = new Set<unknown>()): unknown {
+  if (!isObject(payload) || visited.has(payload)) {
+    return undefined;
+  }
+
+  visited.add(payload);
+
+  if (looksLikeAdaptiveCard(payload)) {
+    return normalizeAdaptiveCard(payload);
+  }
+
+  const candidateKeys = [
+    "card",
+    "adaptiveCard",
+    "adaptive_card",
+    "template",
+    "payload",
+    "content",
+    "json",
+    "value",
+  ];
+
+  for (const key of candidateKeys) {
+    const candidate = payload[key];
+    const card = findAdaptiveCardPayload(candidate, visited);
+
+    if (card) {
+      return card;
+    }
+  }
+
+  for (const value of Object.values(payload)) {
+    const card = findAdaptiveCardPayload(value, visited);
+
+    if (card) {
+      return card;
+    }
+  }
+
+  return undefined;
+}
+
 function resolveCardPayload(payload: unknown): unknown {
   if (!isObject(payload)) {
     return payload;
   }
 
-  if (payload.type === "AdaptiveCard") {
+  const cardPayload = findAdaptiveCardPayload(payload);
+  if (!cardPayload) {
     return payload;
   }
 
-  const wrappedCard = payload.card ?? payload.adaptiveCard ?? payload.template;
-  if (!wrappedCard) {
-    return payload;
-  }
-
-  if (isObject(wrappedCard)) {
-    const template = new ACData.Template(wrappedCard);
+  if (isObject(cardPayload)) {
+    const template = new ACData.Template(cardPayload);
 
     return template.expand({
       $root: getDataContext(payload),
     });
   }
 
-  return wrappedCard;
+  return cardPayload;
 }
 
 function App() {
@@ -85,7 +135,13 @@ function App() {
       }
 
       if (!isObject(cardPayload) || cardPayload.type !== "AdaptiveCard") {
-        throw new Error(`Adaptive card "${cardName}" is not an AdaptiveCard payload`);
+        const keys = isObject(data.card) ? Object.keys(data.card).join(", ") : "";
+
+        throw new Error(
+          `Adaptive card "${cardName}" is not an AdaptiveCard payload${
+            keys ? `. Top-level keys: ${keys}` : ""
+          }`,
+        );
       }
 
       const adaptiveCard = new AdaptiveCards.AdaptiveCard();
