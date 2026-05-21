@@ -9,6 +9,14 @@ type CardResponse = {
   objectKey?: string;
   checkedKeys?: string[];
   availableKeys?: string[];
+  source?: {
+    table: string;
+    columns: string[];
+  };
+  checkedTables?: Array<{
+    table: string;
+    columns: string[];
+  }>;
 };
 
 type JsonObject = Record<string, unknown>;
@@ -98,8 +106,26 @@ function resolveCardPayload(payload: unknown): unknown {
   return cardPayload;
 }
 
+function getCardNameFromUrl() {
+  const url = new URL(window.location.href);
+  const queryCardName =
+    url.searchParams.get("card") ?? url.searchParams.get("q") ?? url.searchParams.get("name");
+
+  if (queryCardName) {
+    return queryCardName;
+  }
+
+  const pathSegments = url.pathname
+    .split("/")
+    .filter(Boolean)
+    .filter((segment) => segment !== "api");
+  const pathCardName = pathSegments[pathSegments.length - 1];
+
+  return pathCardName ?? "member-payment";
+}
+
 function App() {
-  const [cardName] = useState("member-payment");
+  const [cardName] = useState(getCardNameFromUrl);
   const [error, setError] = useState<string | null>(null);
   const [objectKey, setObjectKey] = useState<string | null>(null);
   const [renderedCard, setRenderedCard] = useState<HTMLElement | null>(null);
@@ -111,12 +137,17 @@ function App() {
       setObjectKey(null);
       setRenderedCard(null);
 
-      const response = await fetch(`/api/${cardName}`);
+      const response = await fetch(`/api/${encodeURIComponent(cardName)}`);
       const data = (await response.json()) as CardResponse;
       if (!response.ok) {
         const details = [
           data.checkedKeys?.length ? `Checked: ${data.checkedKeys.join(", ")}` : "",
           data.availableKeys?.length ? `Available: ${data.availableKeys.join(", ")}` : "",
+          data.checkedTables?.length
+            ? `Checked tables: ${data.checkedTables
+                .map((table) => `${table.table} (${table.columns.join(", ")})`)
+                .join("; ")}`
+            : "",
         ]
           .filter(Boolean)
           .join(" ");
@@ -166,7 +197,7 @@ function App() {
         throw new Error(`Adaptive card "${cardName}" rendered with no visible content`);
       }
 
-      setObjectKey(data.objectKey ?? null);
+      setObjectKey(data.source ? `${data.source.table}` : data.objectKey ?? null);
       setRenderedCard(renderedCard);
     }
 
@@ -192,6 +223,7 @@ function App() {
   return (
     <main>
       <h1>Adaptive Card</h1>
+      <p className="source">Search term: {cardName}</p>
       {objectKey && <p className="source">Loaded from {objectKey}</p>}
       {error && <p role="alert">{error}</p>}
       <div ref={cardContainerRef} id="adaptive-card" />

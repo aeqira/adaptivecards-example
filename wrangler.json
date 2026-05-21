@@ -8,10 +8,10 @@
 		"enabled": true
 	},
 	"upload_source_maps": true,
-	"r2_buckets": [
+	"d1_databases": [
 		{
 			"binding": "adaptive_cards",
-			"bucket_name": "adaptive-card-variables"
+			"database_name": "adaptive-cards"
 		}
 	],
 	"assets": {

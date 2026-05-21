@@ -1,80 +1,178 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 
 type Bindings = Env & {
-	adaptive_cards: R2Bucket;
+	adaptive_cards: D1Database;
+};
+
+type TableRow = Record<string, unknown>;
+type SchemaColumn = {
+	name: string;
 };
 
 const App = new Hono<{ Bindings: Bindings }>();
+type AppContext = Context<{ Bindings: Bindings }>;
 
-function getFileName(key: string) {
-	return key.split("/").at(-1) ?? key;
+const identityColumns = [
+	"id",
+	"key",
+	"name",
+	"slug",
+	"title",
+	"filename",
+	"card_name",
+	"cardName",
+	"card_id",
+	"cardId",
+];
+
+const cardColumns = [
+	"card",
+	"adaptive_card",
+	"adaptiveCard",
+	"template",
+	"payload",
+	"content",
+	"json",
+	"value",
+	"data",
+	"body",
+];
+
+function quoteIdentifier(identifier: string) {
+	return `"${identifier.replaceAll(`"`, `""`)}"`;
 }
 
-App.get("/api/:cardName", async (c) => {
-	const cardName = c.req.param("cardName");
-	const bucket = c.env.adaptive_cards;
-
-	if (!bucket) {
-		return c.json({ error: "R2 binding \"adaptive_cards\" is not configured" }, 500);
-	}
-
-	const objectKeys = [
-		`${cardName}.json`,
-		cardName,
-		`adaptive-card-variables/${cardName}.json`,
-		`adaptive-card-variables/${cardName}`,
-	];
-	let cardObject: R2ObjectBody | null = null;
-	let objectKey = "";
-
-	for (const key of objectKeys) {
-		cardObject = await bucket.get(key);
-		if (cardObject) {
-			objectKey = key;
-			break;
-		}
-	}
-
-	if (!cardObject) {
-		const listedObjects = await bucket.list({ limit: 100 });
-		const availableKeys = listedObjects.objects.map((object) => object.key);
-		const discoveredKey = availableKeys.find((key) => {
-			const fileName = getFileName(key);
-
-			return (
-				key === cardName ||
-				key === `${cardName}.json` ||
-				fileName === cardName ||
-				fileName === `${cardName}.json`
-			);
-		});
-
-		if (discoveredKey) {
-			cardObject = await bucket.get(discoveredKey);
-			objectKey = discoveredKey;
-		}
-	}
-
-	if (!cardObject) {
-		const listedObjects = await bucket.list({ limit: 25 });
-
-		return c.json(
-			{
-				error: `Card "${cardName}" was not found`,
-				checkedKeys: objectKeys,
-				availableKeys: listedObjects.objects.map((object) => object.key),
-			},
-			404,
-		);
+function parseMaybeJson(value: unknown) {
+	if (typeof value !== "string") {
+		return value;
 	}
 
 	try {
-		const card = JSON.parse(await cardObject.text());
-
-		return c.json({ card, objectKey });
+		return JSON.parse(value);
 	} catch {
-		return c.json({ error: `Card "${objectKey}" is not valid JSON` }, 422);
+		return value;
 	}
-});
+}
+
+function isObject(value: unknown): value is TableRow {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function looksLikeCardPayload(value: unknown) {
+	return isObject(value) && ("type" in value || "body" in value || "actions" in value);
+}
+
+function extractCard(row: TableRow) {
+	for (const column of cardColumns) {
+		if (!(column in row)) {
+			continue;
+		}
+
+		const value = parseMaybeJson(row[column]);
+		if (looksLikeCardPayload(value)) {
+			return value;
+		}
+	}
+
+	for (const value of Object.values(row)) {
+		const parsedValue = parseMaybeJson(value);
+		if (looksLikeCardPayload(parsedValue)) {
+			return parsedValue;
+		}
+	}
+
+	return row;
+}
+
+async function getColumns(db: D1Database, tableName: string) {
+	try {
+		const result = await db
+			.prepare(`PRAGMA table_info(${quoteIdentifier(tableName)})`)
+			.all<SchemaColumn>();
+
+		return result.results ?? [];
+	} catch {
+		return [];
+	}
+}
+
+async function findCardRow(db: D1Database, tableName: string, columns: string[], cardName: string) {
+	const searchableColumns = columns.filter((column) => identityColumns.includes(column));
+
+	if (searchableColumns.length === 0) {
+		return null;
+	}
+
+	const whereClause = searchableColumns
+		.map((column) => `${quoteIdentifier(column)} IN (?, ?)`)
+		.join(" OR ");
+	const params = searchableColumns.flatMap(() => [cardName, `${cardName}.json`]);
+
+	return db
+		.prepare(`SELECT * FROM ${quoteIdentifier(tableName)} WHERE ${whereClause} LIMIT 1`)
+		.bind(...params)
+		.first<TableRow>();
+}
+
+function getCardNameFromRequest(c: AppContext) {
+	return (
+		c.req.param("cardName") ||
+		c.req.query("card") ||
+		c.req.query("q") ||
+		c.req.query("name") ||
+		""
+	).trim();
+}
+
+async function getCard(c: AppContext) {
+	const cardName = getCardNameFromRequest(c);
+	const db = c.env.adaptive_cards;
+
+	if (!cardName) {
+		return c.json({ error: "Missing card search term" }, 400);
+	}
+
+	if (!db) {
+		return c.json({ error: "D1 binding \"adaptive_cards\" is not configured" }, 500);
+	}
+
+	const checkedTables: Array<{ table: string; columns: string[] }> = [];
+
+	try {
+		const tableName = "cards";
+		const columns = (await getColumns(db, tableName)).map((column) => column.name);
+		checkedTables.push({ table: tableName, columns });
+
+		const row = await findCardRow(db, tableName, columns, cardName);
+		if (row) {
+			return c.json({
+				card: extractCard(row),
+				source: {
+					table: tableName,
+					columns,
+				},
+			});
+		}
+
+		return c.json(
+			{
+				error: `Card "${cardName}" was not found in D1`,
+				checkedTables,
+			},
+			404,
+		);
+	} catch (error) {
+		return c.json(
+			{
+				error: error instanceof Error ? error.message : "Failed to query D1",
+				checkedTables,
+			},
+			500,
+		);
+	}
+}
+
+App.get("/api", getCard);
+App.get("/api/:cardName", getCard);
 
 export default App;
