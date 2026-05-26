@@ -48,7 +48,50 @@ main {
 	background: #ffffff;
 	border: 1px solid #d8dee8;
 	border-radius: 8px;
+	container-type: inline-size;
 	padding: 1rem;
 	overflow-x: auto;
 	text-align: left;
+}
+
+@container (width <= 320px) {
+	.ac-target-narrow,
+	.ac-target-standard,
+	.ac-target-wide,
+	.ac-target-at-least-narrow,
+	.ac-target-at-least-standard,
+	.ac-target-at-least-wide {
+		display: none !important;
+	}
+}
+
+@container (321px <= width <= 480px) {
+	.ac-target-very-narrow,
+	.ac-target-standard,
+	.ac-target-wide,
+	.ac-target-at-most-narrow,
+	.ac-target-at-least-standard,
+	.ac-target-at-least-wide {
+		display: none !important;
+	}
+}
+
+@container (481px <= width <= 1200px) {
+	.ac-target-very-narrow,
+	.ac-target-narrow,
+	.ac-target-wide,
+	.ac-target-at-most-narrow,
+	.ac-target-at-least-wide {
+		display: none !important;
+	}
+}
+
+@container (width >= 1201px) {
+	.ac-target-very-narrow,
+	.ac-target-narrow,
+	.ac-target-standard,
+	.ac-target-at-most-narrow,
+	.ac-target-at-most-standard {
+		display: none !important;
+	}
 }

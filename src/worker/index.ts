@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import * as ACData from "adaptivecards-templating";
 
 type Bindings = Env & {
 	adaptive_cards: D1Database;
@@ -28,6 +29,7 @@ const bindingPattern = /\$\{([A-Za-z0-9_.\-[\]]+)\}/g;
 const maxBindingsPerCard = 50;
 const maxBindingBytes = 256 * 1024;
 const maxQueryRows = 100;
+const maxTemplateExpansionPasses = 5;
 
 function parseMaybeJson(value: unknown) {
 	if (typeof value !== "string") {
@@ -49,96 +51,26 @@ function looksLikeCardPayload(value: unknown) {
 	return isObject(value) && ("type" in value || "body" in value || "actions" in value);
 }
 
-function getPathValue(source: Record<string, unknown>, path: string) {
-	return path
-		.replace(/\[(\d+)\]/g, ".$1")
-		.split(".")
-		.reduce<unknown>((current, segment) => {
-			if (Array.isArray(current) && /^\d+$/.test(segment)) {
-				return current[Number(segment)];
-			}
-
-			if (!isObject(current)) {
-				return undefined;
-			}
-
-			return current[segment];
-		}, source);
-}
-
-function bindString(value: string, data: Record<string, unknown>) {
-	const exactMatch = value.match(/^\$\{([A-Za-z0-9_.\-[\]]+)\}$/);
-	if (exactMatch) {
-		const replacement = getPathValue(data, exactMatch[1]);
-
-		return replacement === undefined || replacement === null ? value : replacement;
-	}
-
-	return value.replace(bindingPattern, (_match, path: string) => {
-		const replacement = getPathValue(data, path);
-
-		return replacement === undefined || replacement === null ? `\${${path}}` : String(replacement);
-	});
-}
-
-function getDataContext(value: unknown) {
-	if (isObject(value)) {
-		return value;
-	}
-
-	return {
-		value,
-	};
-}
-
-function expandDataTemplate(item: Record<string, unknown>, data: Record<string, unknown>) {
-	if (typeof item.$data !== "string") {
-		return undefined;
-	}
-
-	const source = bindString(item.$data, data);
-	if (!Array.isArray(source)) {
-		return undefined;
-	}
-
-	const template = { ...item };
-	delete template.$data;
-
-	return source.map((value) => bindData(template, { ...data, ...getDataContext(value) }));
-}
-
-function bindData(value: unknown, data: Record<string, unknown>): unknown {
+function normalizeTemplateExpressions(value: unknown): unknown {
 	if (typeof value === "string") {
-		const boundValue = bindString(value, data);
+		return value.replace(bindingPattern, (match, path: string) => {
+			const rootName = path.split(/[.[\]]/)[0];
 
-		return boundValue === value ? boundValue : bindData(boundValue, data);
-	}
-
-	if (Array.isArray(value)) {
-		return value.flatMap((item) => {
-			if (isObject(item) && "$data" in item) {
-				const expandedItems = expandDataTemplate(item, data);
-
-				if (expandedItems) {
-					return expandedItems;
-				}
+			if (!rootName.includes("-")) {
+				return match;
 			}
 
-			return [bindData(item, data)];
+			return `\${$root[${JSON.stringify(rootName)}]${path.slice(rootName.length)}}`;
 		});
 	}
 
+	if (Array.isArray(value)) {
+		return value.map(normalizeTemplateExpressions);
+	}
+
 	if (isObject(value)) {
-		if ("$data" in value) {
-			const expandedItems = expandDataTemplate(value, data);
-
-			if (expandedItems) {
-				return expandedItems;
-			}
-		}
-
 		return Object.fromEntries(
-			Object.entries(value).map(([key, childValue]) => [key, bindData(childValue, data)]),
+			Object.entries(value).map(([key, childValue]) => [key, normalizeTemplateExpressions(childValue)]),
 		);
 	}
 
@@ -392,7 +324,22 @@ async function getBindingData(
 }
 
 function expandCardTemplate(templatePayload: unknown, data: Record<string, unknown>) {
-	return bindData(templatePayload, data);
+	let expandedPayload = templatePayload;
+
+	for (let index = 0; index < maxTemplateExpansionPasses; index += 1) {
+		const template = new ACData.Template(normalizeTemplateExpressions(expandedPayload));
+		const nextPayload = template.expand({
+			$root: data,
+		});
+
+		if (JSON.stringify(nextPayload) === JSON.stringify(expandedPayload)) {
+			return nextPayload;
+		}
+
+		expandedPayload = nextPayload;
+	}
+
+	return expandedPayload;
 }
 
 async function findCardRow(db: D1Database, cardName: string) {
@@ -457,7 +404,22 @@ async function getCard(c: AppContext) {
 			const data = await getBindingData(db, variablesBucket, bindingSpecs);
 			const templateData = await getBindingData(db, variablesBucket, templateBindingSpecs);
 			Object.assign(data, templateData);
-			const card = expandCardTemplate(templatePayload, data);
+			let card: unknown;
+
+			try {
+				card = expandCardTemplate(templatePayload, data);
+			} catch (error) {
+				return c.json(
+					{
+						error:
+							error instanceof Error
+								? `Adaptive Card template expansion failed: ${error.message}`
+								: "Adaptive Card template expansion failed",
+					},
+					422,
+				);
+			}
+
 			const unresolvedBindings = Array.from(getUnresolvedBindings(card)).filter(
 				(binding) => binding !== "fallback",
 			);

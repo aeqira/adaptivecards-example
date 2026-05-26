@@ -9,6 +9,27 @@ type CardResponse = {
 
 type JsonObject = Record<string, unknown>;
 
+const targetWidthClassNames: Record<string, string> = {
+  "AtLeast:Narrow": "ac-target-at-least-narrow",
+  "AtLeast:Standard": "ac-target-at-least-standard",
+  "AtLeast:Wide": "ac-target-at-least-wide",
+  "AtMost:Narrow": "ac-target-at-most-narrow",
+  "AtMost:Standard": "ac-target-at-most-standard",
+  "AtMost:Wide": "ac-target-at-most-wide",
+  Narrow: "ac-target-narrow",
+  Standard: "ac-target-standard",
+  VeryNarrow: "ac-target-very-narrow",
+  Wide: "ac-target-wide",
+};
+
+const targetWidthBreakpoints = {
+  narrow: 320,
+  standard: 480,
+  wide: 1200,
+};
+
+const targetWidthOrder = ["VeryNarrow", "Narrow", "Standard", "Wide"] as const;
+
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -27,6 +48,147 @@ function normalizeCardPayload(value: unknown): JsonObject | null {
     version: "1.5",
     ...value,
   };
+}
+
+function applySizingFix(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value
+      .map(applySizingFix)
+      .filter((item) => item !== null);
+  }
+
+  if (!isObject(value)) {
+    return value;
+  }
+
+  const fixedValue = Object.fromEntries(
+    Object.entries(value).map(([key, childValue]) => [key, applySizingFix(childValue)]),
+  );
+
+  if (typeof fixedValue.targetWidth === "string") {
+    const normalizedTargetWidth = normalizeTargetWidth(fixedValue.targetWidth);
+    const className = normalizedTargetWidth
+      ? targetWidthClassNames[normalizedTargetWidth]
+      : undefined;
+
+    if (className && typeof fixedValue.customCssSelector !== "string") {
+      fixedValue.customCssSelector = className;
+    }
+  }
+
+  return fixedValue;
+}
+
+function getTargetWidthBucket(width: number) {
+  if (width <= targetWidthBreakpoints.narrow) {
+    return "VeryNarrow";
+  }
+
+  if (width <= targetWidthBreakpoints.standard) {
+    return "Narrow";
+  }
+
+  if (width <= targetWidthBreakpoints.wide) {
+    return "Standard";
+  }
+
+  return "Wide";
+}
+
+function normalizeTargetWidth(targetWidth: string) {
+  const [rawPrefix, rawWidth, ...extraParts] = targetWidth.split(":");
+
+  if (extraParts.length > 0) {
+    return null;
+  }
+
+  const widthNames: Record<string, string> = {
+    narrow: "Narrow",
+    standard: "Standard",
+    verynarrow: "VeryNarrow",
+    wide: "Wide",
+  };
+
+  const widthName = widthNames[(rawWidth ?? rawPrefix).toLowerCase()];
+
+  if (!widthName) {
+    return null;
+  }
+
+  if (!rawWidth) {
+    return widthName;
+  }
+
+  const prefix = rawPrefix.toLowerCase();
+
+  if (prefix === "atleast") {
+    return `AtLeast:${widthName}`;
+  }
+
+  if (prefix === "atmost") {
+    return `AtMost:${widthName}`;
+  }
+
+  return null;
+}
+
+function targetWidthMatches(targetWidth: string, width: number) {
+  const normalizedTargetWidth = normalizeTargetWidth(targetWidth);
+
+  if (!normalizedTargetWidth) {
+    return true;
+  }
+
+  const bucket = getTargetWidthBucket(width);
+  const bucketIndex = targetWidthOrder.indexOf(bucket);
+
+  if (normalizedTargetWidth.startsWith("AtLeast:")) {
+    return (
+      bucketIndex >=
+      targetWidthOrder.indexOf(
+        normalizedTargetWidth.slice("AtLeast:".length) as (typeof targetWidthOrder)[number],
+      )
+    );
+  }
+
+  if (normalizedTargetWidth.startsWith("AtMost:")) {
+    return (
+      bucketIndex <=
+      targetWidthOrder.indexOf(
+        normalizedTargetWidth.slice("AtMost:".length) as (typeof targetWidthOrder)[number],
+      )
+    );
+  }
+
+  return normalizedTargetWidth === bucket;
+}
+
+function filterTargetWidths(value: unknown, width: number): unknown {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => filterTargetWidths(item, width))
+      .filter((item) => item !== null);
+  }
+
+  if (!isObject(value)) {
+    return value;
+  }
+
+  if (
+    typeof value.targetWidth === "string" &&
+    !targetWidthMatches(value.targetWidth, width)
+  ) {
+    return null;
+  }
+
+  const filteredValue = Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "targetWidth")
+      .map(([key, childValue]) => [key, filterTargetWidths(childValue, width)])
+      .filter(([, childValue]) => childValue !== null),
+  );
+
+  return filteredValue;
 }
 
 function getCardNameFromUrl() {
@@ -51,8 +213,20 @@ function App() {
   const [cardName] = useState(getCardNameFromUrl);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [layoutWidth, setLayoutWidth] = useState(window.innerWidth);
   const [renderedCard, setRenderedCard] = useState<HTMLElement | null>(null);
   const cardContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function updateLayoutWidth() {
+      setLayoutWidth(cardContainerRef.current?.clientWidth ?? window.innerWidth);
+    }
+
+    updateLayoutWidth();
+    window.addEventListener("resize", updateLayoutWidth);
+
+    return () => window.removeEventListener("resize", updateLayoutWidth);
+  }, []);
 
   useEffect(() => {
     async function loadCard() {
@@ -79,8 +253,9 @@ function App() {
       }
 
       const adaptiveCard = new AdaptiveCards.AdaptiveCard();
+      const sizedCardPayload = filterTargetWidths(cardPayload, layoutWidth);
 
-      adaptiveCard.parse(cardPayload);
+      adaptiveCard.parse(applySizingFix(sizedCardPayload));
 
       const validationResults = adaptiveCard.validateProperties();
       if (validationResults.validationEvents.length > 0) {
@@ -113,7 +288,7 @@ function App() {
 
       setError(error instanceof Error ? error.message : "Failed to load adaptive card");
     });
-  }, [cardName]);
+  }, [cardName, layoutWidth]);
 
   useEffect(() => {
     const container = cardContainerRef.current;

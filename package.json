@@ -13,9 +13,16 @@
 	},
 	"dependencies": {
 		"adaptivecards": "^3.0.6",
+		"adaptivecards-templating": "^2.3.1",
 		"hono": "^4.12.21",
 		"react": "19.2.1",
 		"react-dom": "19.2.1"
+	},
+	"overrides": {
+		"adaptive-expressions": {
+			"fast-xml-parser": "5.7.0",
+			"uuid": "11.1.1"
+		}
 	},
 	"devDependencies": {
 		"@cloudflare/vite-plugin": "1.37.2",
