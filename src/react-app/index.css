@@ -11,15 +11,6 @@
 	-moz-osx-font-smoothing: grayscale;
 }
 
-a {
-	font-weight: 500;
-	color: #646cff;
-	text-decoration: inherit;
-}
-a:hover {
-	color: #535bf2;
-}
-
 body {
 	margin: 0;
 	min-width: 320px;
@@ -32,27 +23,8 @@ h1 {
 	margin: 0 0 1rem;
 }
 
-button {
-	border-radius: 8px;
-	border: 1px solid transparent;
-	padding: 0.6em 1.2em;
-	font-size: 1em;
-	font-weight: 500;
-	font-family: inherit;
-	background-color: #1a1a1a;
-	cursor: pointer;
-	transition: border-color 0.25s;
-}
-button:hover {
-	border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-	outline: 4px auto -webkit-focus-ring-color;
-}
-
 main {
-	width: min(100% - 2rem, 760px);
+	width: min(100% - 2rem, 1100px);
 	margin: 0 auto;
 	padding: 2rem 0;
 }
@@ -77,5 +49,6 @@ main {
 	border: 1px solid #d8dee8;
 	border-radius: 8px;
 	padding: 1rem;
+	overflow-x: auto;
 	text-align: left;
 }

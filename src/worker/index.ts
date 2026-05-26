@@ -24,7 +24,7 @@ type BindingSpec =
 
 const App = new Hono<{ Bindings: Bindings }>();
 type AppContext = Context<{ Bindings: Bindings }>;
-const bindingPattern = /\$\{([A-Za-z0-9_.-]+)\}/g;
+const bindingPattern = /\$\{([A-Za-z0-9_.\-[\]]+)\}/g;
 const maxBindingsPerCard = 50;
 const maxBindingBytes = 256 * 1024;
 const maxQueryRows = 100;
@@ -50,17 +50,24 @@ function looksLikeCardPayload(value: unknown) {
 }
 
 function getPathValue(source: Record<string, unknown>, path: string) {
-	return path.split(".").reduce<unknown>((current, segment) => {
-		if (!isObject(current)) {
-			return undefined;
-		}
+	return path
+		.replace(/\[(\d+)\]/g, ".$1")
+		.split(".")
+		.reduce<unknown>((current, segment) => {
+			if (Array.isArray(current) && /^\d+$/.test(segment)) {
+				return current[Number(segment)];
+			}
 
-		return current[segment];
-	}, source);
+			if (!isObject(current)) {
+				return undefined;
+			}
+
+			return current[segment];
+		}, source);
 }
 
 function bindString(value: string, data: Record<string, unknown>) {
-	const exactMatch = value.match(/^\$\{([A-Za-z0-9_.-]+)\}$/);
+	const exactMatch = value.match(/^\$\{([A-Za-z0-9_.\-[\]]+)\}$/);
 	if (exactMatch) {
 		const replacement = getPathValue(data, exactMatch[1]);
 
@@ -102,7 +109,9 @@ function expandDataTemplate(item: Record<string, unknown>, data: Record<string, 
 
 function bindData(value: unknown, data: Record<string, unknown>): unknown {
 	if (typeof value === "string") {
-		return bindString(value, data);
+		const boundValue = bindString(value, data);
+
+		return boundValue === value ? boundValue : bindData(boundValue, data);
 	}
 
 	if (Array.isArray(value)) {
@@ -120,12 +129,46 @@ function bindData(value: unknown, data: Record<string, unknown>): unknown {
 	}
 
 	if (isObject(value)) {
+		if ("$data" in value) {
+			const expandedItems = expandDataTemplate(value, data);
+
+			if (expandedItems) {
+				return expandedItems;
+			}
+		}
+
 		return Object.fromEntries(
 			Object.entries(value).map(([key, childValue]) => [key, bindData(childValue, data)]),
 		);
 	}
 
 	return value;
+}
+
+function collectBindingRoots(value: unknown, roots = new Set<string>()) {
+	if (typeof value === "string") {
+		for (const match of value.matchAll(bindingPattern)) {
+			roots.add(match[1].split(/[.[\]]/)[0]);
+		}
+
+		return roots;
+	}
+
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			collectBindingRoots(item, roots);
+		}
+
+		return roots;
+	}
+
+	if (isObject(value)) {
+		for (const childValue of Object.values(value)) {
+			collectBindingRoots(childValue, roots);
+		}
+	}
+
+	return roots;
 }
 
 function getUnresolvedBindings(value: unknown, missing = new Set<string>()) {
@@ -165,14 +208,20 @@ function getR2BindingName(key: string) {
 }
 
 async function getR2BindingValue(bucket: R2Bucket, bindingName: string) {
-	const object = await bucket.get(bindingName);
-	if (!object || object.size > maxBindingBytes) {
-		return undefined;
+	const keys = bindingName.endsWith(".json") ? [bindingName] : [bindingName, `${bindingName}.json`];
+
+	for (const key of keys) {
+		const object = await bucket.get(key);
+		if (!object || object.size > maxBindingBytes) {
+			continue;
+		}
+
+		const text = await object.text();
+
+		return parseMaybeJson(text);
 	}
 
-	const text = await object.text();
-
-	return parseMaybeJson(text);
+	return undefined;
 }
 
 function normalizeBindingValue(bindingName: string, value: unknown) {
@@ -281,6 +330,15 @@ function getBindingSpecs(dataColumn: unknown): BindingSpec[] {
 	return [];
 }
 
+function getTemplateBindingSpecs(templatePayload: unknown, existingSpecs: BindingSpec[]) {
+	const existingNames = new Set(existingSpecs.map((spec) => spec.name));
+
+	return Array.from(collectBindingRoots(templatePayload))
+		.filter((name) => isSafeBindingName(name) && !existingNames.has(name))
+		.map((name): BindingSpec => ({ key: `${name}.json`, name, type: "r2" }))
+		.slice(0, maxBindingsPerCard);
+}
+
 async function getBindingData(
 	db: D1Database,
 	bucket: R2Bucket | undefined,
@@ -299,14 +357,34 @@ async function getBindingData(
 				continue;
 			}
 
-			data[spec.name] = normalizeBindingValue(spec.key, value);
+			const normalizedValue = normalizeBindingValue(spec.key, value);
+			data[spec.name] = normalizedValue;
+
+			if (isObject(normalizedValue)) {
+				Object.assign(data, normalizedValue);
+			}
 		} else {
 			const value = await getD1BindingValue(db, spec.query);
-			if (value === undefined) {
+			if (value !== undefined) {
+				data[spec.name] = value;
 				continue;
 			}
 
-			data[spec.name] = value;
+			if (!bucket) {
+				continue;
+			}
+
+			const r2Value = await getR2BindingValue(bucket, spec.name);
+			if (r2Value === undefined) {
+				continue;
+			}
+
+			const normalizedValue = normalizeBindingValue(spec.name, r2Value);
+			data[spec.name] = normalizedValue;
+
+			if (isObject(normalizedValue)) {
+				Object.assign(data, normalizedValue);
+			}
 		}
 	}
 
@@ -318,16 +396,18 @@ function expandCardTemplate(templatePayload: unknown, data: Record<string, unkno
 }
 
 async function findCardRow(db: D1Database, cardName: string) {
+	const spacedName = cardName.replace(/[-_]+/g, " ");
+
 	return db
 		.prepare(
 			`
 				SELECT payload, data
 				FROM cards
-				WHERE name = ?
+				WHERE name IN (?, ?)
 				LIMIT 1
 			`,
 		)
-		.bind(cardName)
+		.bind(cardName, spacedName)
 		.first<CardRow>();
 }
 
@@ -373,9 +453,14 @@ async function getCard(c: AppContext) {
 			}
 
 			const bindingSpecs = getBindingSpecs(row.data);
+			const templateBindingSpecs = getTemplateBindingSpecs(templatePayload, bindingSpecs);
 			const data = await getBindingData(db, variablesBucket, bindingSpecs);
+			const templateData = await getBindingData(db, variablesBucket, templateBindingSpecs);
+			Object.assign(data, templateData);
 			const card = expandCardTemplate(templatePayload, data);
-			const unresolvedBindings = Array.from(getUnresolvedBindings(card));
+			const unresolvedBindings = Array.from(getUnresolvedBindings(card)).filter(
+				(binding) => binding !== "fallback",
+			);
 
 			if (unresolvedBindings.length > 0) {
 				return c.json(
