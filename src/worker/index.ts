@@ -26,6 +26,7 @@ type BindingSpec =
 const App = new Hono<{ Bindings: Bindings }>();
 type AppContext = Context<{ Bindings: Bindings }>;
 const bindingPattern = /\$\{([A-Za-z0-9_.\-[\]]+)\}/g;
+const rootReferencePattern = /\$\{\s*\$root\[(?:"([^"]+)"|'([^']+)')\][^}]*\}/g;
 const maxBindingsPerCard = 50;
 const maxBindingBytes = 256 * 1024;
 const maxQueryRows = 100;
@@ -51,10 +52,14 @@ function looksLikeCardPayload(value: unknown) {
 	return isObject(value) && ("type" in value || "body" in value || "actions" in value);
 }
 
+function getReferenceRoot(path: string) {
+	return path.split(/[.[\]]/)[0];
+}
+
 function normalizeTemplateExpressions(value: unknown): unknown {
 	if (typeof value === "string") {
 		return value.replace(bindingPattern, (match, path: string) => {
-			const rootName = path.split(/[.[\]]/)[0];
+			const rootName = getReferenceRoot(path);
 
 			if (!rootName.includes("-")) {
 				return match;
@@ -77,11 +82,23 @@ function normalizeTemplateExpressions(value: unknown): unknown {
 	return value;
 }
 
+function collectStringBindingRoots(value: string, roots: Set<string>) {
+	for (const match of value.matchAll(rootReferencePattern)) {
+		const rootName = match[1] ?? match[2];
+
+		if (rootName) {
+			roots.add(rootName);
+		}
+	}
+
+	for (const match of value.matchAll(bindingPattern)) {
+		roots.add(getReferenceRoot(match[1]));
+	}
+}
+
 function collectBindingRoots(value: unknown, roots = new Set<string>()) {
 	if (typeof value === "string") {
-		for (const match of value.matchAll(bindingPattern)) {
-			roots.add(match[1].split(/[.[\]]/)[0]);
-		}
+		collectStringBindingRoots(value, roots);
 
 		return roots;
 	}
