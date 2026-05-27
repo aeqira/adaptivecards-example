@@ -23,7 +23,10 @@ type BindingSpec =
 			type: "d1";
 	  };
 
-const App = new Hono<{ Bindings: Bindings }>();
+type SubmittedCardData = Record<string, unknown>;
+type SubmissionRow = Record<string, unknown>;
+
+const app = new Hono<{ Bindings: Bindings }>();
 type AppContext = Context<{ Bindings: Bindings }>;
 const bindingPattern = /\$\{([A-Za-z0-9_.\-[\]]+)\}/g;
 const rootReferencePattern = /\$\{\s*\$root\[(?:"([^"]+)"|'([^']+)')\][^}]*\}/g;
@@ -31,6 +34,21 @@ const maxBindingsPerCard = 50;
 const maxBindingBytes = 256 * 1024;
 const maxQueryRows = 100;
 const maxTemplateExpansionPasses = 5;
+const maxSubmissionBytes = 64 * 1024;
+const fluentIconCdnBaseUrl = "https://cdn.jsdelivr.net/npm/@fluentui/svg-icons/icons/";
+const iconReferencePrefix = "icon:";
+const renderedIconSize = "50px";
+const paymentDetailsCardName = "payment-details";
+
+app.use("/api", async (c, next) => {
+	await next();
+	c.header("Cache-Control", "no-store");
+});
+
+app.use("/api/*", async (c, next) => {
+	await next();
+	c.header("Cache-Control", "no-store");
+});
 
 function parseMaybeJson(value: unknown) {
 	if (typeof value !== "string") {
@@ -44,42 +62,419 @@ function parseMaybeJson(value: unknown) {
 	}
 }
 
+function createId() {
+	return crypto.randomUUID();
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getStringValue(data: SubmittedCardData, key: string, maxLength = 255) {
+	const value = data[key];
+
+	if (value === undefined || value === null) {
+		return undefined;
+	}
+
+	const stringValue = String(value).trim();
+
+	return stringValue ? stringValue.slice(0, maxLength) : undefined;
+}
+
+function getNumberValue(data: SubmittedCardData, key: string) {
+	const value = data[key];
+	const numberValue = typeof value === "number" ? value : Number(value);
+
+	return Number.isFinite(numberValue) ? numberValue : undefined;
+}
+
+function getCurrencyString(data: SubmittedCardData, key: string) {
+	const value = getNumberValue(data, key);
+
+	return value === undefined ? undefined : value.toFixed(2);
+}
+
+function getBooleanValue(data: SubmittedCardData, key: string) {
+	const value = data[key];
+
+	if (typeof value === "boolean") {
+		return value;
+	}
+
+	if (typeof value === "string") {
+		return value.toLowerCase() === "true";
+	}
+
+	return undefined;
+}
+
+function removeUndefinedValues(value: unknown): unknown {
+	if (Array.isArray(value)) {
+		return value.map(removeUndefinedValues);
+	}
+
+	if (isObject(value)) {
+		return Object.fromEntries(
+			Object.entries(value)
+				.map(([key, childValue]) => [key, removeUndefinedValues(childValue)])
+				.filter(([, childValue]) => childValue !== undefined),
+		);
+	}
+
+	return value;
+}
+
+function getExpirationDate(data: SubmittedCardData) {
+	const value = getStringValue(data, "cardExpiration", 16);
+
+	if (!value) {
+		return undefined;
+	}
+
+	const digits = value.replace(/\D/g, "");
+
+	if (/^\d{4}$/.test(digits)) {
+		const month = digits.slice(0, 2);
+		const year = digits.slice(2);
+
+		return `20${year}-${month}`;
+	}
+
+	if (/^\d{6}$/.test(digits)) {
+		const month = digits.slice(0, 2);
+		const year = digits.slice(2);
+
+		return `${year}-${month}`;
+	}
+
+	return value;
+}
+
+function getAuthorizeNetPayment(data: SubmittedCardData) {
+	const dataDescriptor = getStringValue(data, "dataDescriptor", 255);
+	const dataValue = getStringValue(data, "dataValue", 4096);
+
+	if (dataDescriptor && dataValue) {
+		return {
+			opaqueData: {
+				dataDescriptor,
+				dataValue,
+			},
+		};
+	}
+
+	const cardNumber = getStringValue(data, "cardAccount", 32);
+	const expirationDate = getExpirationDate(data);
+	const cardCode = getStringValue(data, "cardCode", 8);
+
+	if (!cardNumber && !expirationDate && !cardCode) {
+		return undefined;
+	}
+
+	return {
+		creditCard: removeUndefinedValues({
+			cardCode,
+			cardNumber,
+			expirationDate,
+		}),
+	};
+}
+
+function getUserFields(data: SubmittedCardData, message: string | undefined) {
+	return [
+		{
+			name: "message",
+			value: message,
+		},
+		{
+			name: "updateTemenosAddress",
+			value: getBooleanValue(data, "updateTemenosAddress")?.toString(),
+		},
+		{
+			name: "updateTemenosEmail",
+			value: getBooleanValue(data, "Update Temenos Email")?.toString(),
+		},
+	].filter((field) => field.value !== undefined);
+}
+
+function shapePaymentSubmission(data: SubmittedCardData) {
+	const email = getStringValue(data, "Member Email", 255);
+	const firstName = getStringValue(data, "memberFirst", 100);
+	const lastName = getStringValue(data, "memberLast", 100);
+	const memberNumber = getStringValue(data, "memberNumber", 32);
+	const message = getStringValue(data, "paymentMessage", 255);
+	const payment = getAuthorizeNetPayment(data);
+	const userField = getUserFields(data, message);
+
+	return removeUndefinedValues({
+		createTransactionRequest: {
+			refId: memberNumber,
+			transactionRequest: {
+				amount: getCurrencyString(data, "paymentAmount"),
+				billTo: {
+					address: getStringValue(data, "memberStreet", 255),
+					city: getStringValue(data, "memberCity", 100),
+					country: "US",
+					firstName,
+					lastName,
+					state: getStringValue(data, "memberState", 32),
+					zip: getStringValue(data, "memberZipcode", 32),
+				},
+				customer: {
+					email,
+					id: memberNumber,
+				},
+				payment,
+				transactionSettings: {
+					setting: {
+						settingName: "testRequest",
+						settingValue: "false",
+					},
+				},
+				transactionType: "authCaptureTransaction",
+				userFields: userField.length > 0 ? { userField } : undefined,
+			},
+		},
+	});
+}
+
+function shapeSubmissionColumns(data: SubmittedCardData) {
+	return {
+		amount: getNumberValue(data, "paymentAmount"),
+		email: getStringValue(data, "Member Email", 255),
+		firstName: getStringValue(data, "memberFirst", 100),
+		lastName: getStringValue(data, "memberLast", 100),
+		memberNumber: getNumberValue(data, "memberNumber"),
+		message: getStringValue(data, "paymentMessage", 255),
+	};
+}
+
+function hasPaymentSubmissionData(payment: unknown) {
+	return isObject(payment) && Object.keys(payment).length > 0;
+}
+
+function toCamelCase(value: string) {
+	return value
+		.replace(/[^A-Za-z0-9]+(.)/g, (_, character: string) => character.toUpperCase())
+		.replace(/^[A-Z]/, (character) => character.toLowerCase());
+}
+
+function shapeSubmissionLookupData(row: SubmissionRow) {
+	const submission: Record<string, unknown> = {};
+
+	for (const [key, value] of Object.entries(row)) {
+		const normalizedKey = toCamelCase(key);
+		const parsedValue = key.toLowerCase() === "payment" ? parseMaybeJson(value) : value;
+
+		submission[key] = parsedValue;
+		submission[normalizedKey] = parsedValue;
+	}
+
+	return {
+		payment: submission.payment,
+		submission,
+		...submission,
+	};
 }
 
 function looksLikeCardPayload(value: unknown) {
 	return isObject(value) && ("type" in value || "body" in value || "actions" in value);
 }
 
-function getReferenceRoot(path: string) {
-	return path.split(/[.[\]]/)[0];
+function hasBindingExpression(value: string) {
+	bindingPattern.lastIndex = 0;
+	return bindingPattern.test(value);
 }
 
-function normalizeTemplateExpressions(value: unknown): unknown {
-	if (typeof value === "string") {
-		return value.replace(bindingPattern, (match, path: string) => {
-			const rootName = getReferenceRoot(path);
+function getIconReference(
+	iconName: string,
+	iconIndexes: Map<string, number>,
+	nextIconIndex: { value: number },
+) {
+	const existingIndex = iconIndexes.get(iconName);
+	const iconIndex = existingIndex ?? nextIconIndex.value;
 
-			if (!rootName.includes("-")) {
-				return match;
-			}
-
-			return `\${$root[${JSON.stringify(rootName)}]${path.slice(rootName.length)}}`;
-		});
+	if (existingIndex === undefined) {
+		iconIndexes.set(iconName, iconIndex);
+		nextIconIndex.value += 1;
 	}
 
+	return `\${icon[${iconIndex}]}`;
+}
+
+function restoreIconTemplateReferences(
+	value: unknown,
+	iconIndexes = new Map<string, number>(),
+	nextIconIndex = { value: 0 },
+): unknown {
 	if (Array.isArray(value)) {
-		return value.map(normalizeTemplateExpressions);
+		return value.map((item) => restoreIconTemplateReferences(item, iconIndexes, nextIconIndex));
 	}
 
-	if (isObject(value)) {
-		return Object.fromEntries(
-			Object.entries(value).map(([key, childValue]) => [key, normalizeTemplateExpressions(childValue)]),
-		);
+	if (!isObject(value)) {
+		return value;
 	}
 
-	return value;
+	const restoredValue = Object.fromEntries(
+		Object.entries(value).map(([key, childValue]) => [
+			key,
+			restoreIconTemplateReferences(childValue, iconIndexes, nextIconIndex),
+		]),
+	);
+
+	if (
+		restoredValue.type === "Icon" &&
+		typeof restoredValue.name === "string" &&
+		!hasBindingExpression(restoredValue.name)
+	) {
+		restoredValue.name = getIconReference(restoredValue.name, iconIndexes, nextIconIndex);
+	}
+
+	if (
+		typeof restoredValue.iconUrl === "string" &&
+		restoredValue.iconUrl.startsWith(iconReferencePrefix) &&
+		!hasBindingExpression(restoredValue.iconUrl)
+	) {
+		const iconName = restoredValue.iconUrl.slice(iconReferencePrefix.length);
+		restoredValue.iconUrl = `${iconReferencePrefix}${getIconReference(
+			iconName,
+			iconIndexes,
+			nextIconIndex,
+		)}`;
+	}
+
+	return restoredValue;
+}
+
+function restoreD1CardTemplateReferences(value: unknown, data: Record<string, unknown>): unknown {
+	if (Array.isArray(value)) {
+		return value.map((item) => restoreD1CardTemplateReferences(item, data));
+	}
+
+	if (!isObject(value)) {
+		return value;
+	}
+
+	const restoredValue = Object.fromEntries(
+		Object.entries(value).map(([key, childValue]) => [
+			key,
+			restoreD1CardTemplateReferences(childValue, data),
+		]),
+	);
+
+	if (
+		restoredValue.type === "Action.ShowCard" &&
+		typeof restoredValue.title === "string" &&
+		isObject(restoredValue.card) &&
+		!("body" in restoredValue.card) &&
+		!("actions" in restoredValue.card)
+	) {
+		const bindingName = toSnakeCase(restoredValue.title).replace(/_/g, "-");
+		const cardPayload = data[bindingName];
+
+		if (looksLikeCardPayload(cardPayload)) {
+			restoredValue.card = `\${$root[${JSON.stringify(bindingName)}]}`;
+		}
+	}
+
+	return restoredValue;
+}
+
+function toSnakeCase(value: string) {
+	return value
+		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+		.replace(/[^A-Za-z0-9]+/g, "_")
+		.replace(/^_+|_+$/g, "")
+		.toLowerCase();
+}
+
+function isSafeImageUrl(value: string) {
+	return (
+		value.startsWith("https://") ||
+		/^data:image\/(?:png|gif|jpe?g|svg\+xml);base64,[A-Za-z0-9+/=]+$/i.test(value)
+	);
+}
+
+function getIconImageUrl(iconName: string) {
+	if (hasBindingExpression(iconName)) {
+		return iconName;
+	}
+
+	const normalizedIconName = iconName.startsWith(iconReferencePrefix)
+		? iconName.slice(iconReferencePrefix.length)
+		: iconName;
+
+	if (isSafeImageUrl(normalizedIconName)) {
+		return normalizedIconName;
+	}
+
+	if (!/^[A-Za-z][A-Za-z0-9]*$/.test(normalizedIconName)) {
+		return undefined;
+	}
+
+	return `${fluentIconCdnBaseUrl}${toSnakeCase(normalizedIconName)}_24_regular.svg`;
+}
+
+function resolveCardIcons(value: unknown): unknown {
+	if (Array.isArray(value)) {
+		return value.map(resolveCardIcons);
+	}
+
+	if (!isObject(value)) {
+		return value;
+	}
+
+	const resolvedValue = Object.fromEntries(
+		Object.entries(value).map(([key, childValue]) => [key, resolveCardIcons(childValue)]),
+	);
+
+	if (resolvedValue.type === "Icon" && typeof resolvedValue.name === "string") {
+		const url = getIconImageUrl(resolvedValue.name);
+
+		if (!url || hasBindingExpression(url)) {
+			return resolvedValue;
+		}
+
+		const imageValue: Record<string, unknown> = {
+			type: "Image",
+			url,
+			altText: resolvedValue.altText ?? resolvedValue.name,
+			height: renderedIconSize,
+			width: renderedIconSize,
+		};
+
+		for (const key of [
+			"horizontalAlignment",
+			"id",
+			"isVisible",
+			"selectAction",
+			"separator",
+			"spacing",
+			"targetWidth",
+		]) {
+			if (key in resolvedValue) {
+				imageValue[key] = resolvedValue[key];
+			}
+		}
+
+		return imageValue;
+	}
+
+	if (typeof resolvedValue.iconUrl === "string") {
+		const url = getIconImageUrl(resolvedValue.iconUrl);
+
+		if (url && !hasBindingExpression(url)) {
+			resolvedValue.iconUrl = url;
+		}
+	}
+
+	return resolvedValue;
+}
+
+function getReferenceRoot(path: string) {
+	return path.split(/[.[\]]/)[0];
 }
 
 function collectStringBindingRoots(value: string, roots: Set<string>) {
@@ -340,11 +735,19 @@ async function getBindingData(
 	return data;
 }
 
+function prepareTemplatePayload(templatePayload: unknown, data: Record<string, unknown>) {
+	const templateWithD1Cards = restoreD1CardTemplateReferences(templatePayload, data);
+
+	return "icon" in data ? restoreIconTemplateReferences(templateWithD1Cards) : templateWithD1Cards;
+}
+
 function expandCardTemplate(templatePayload: unknown, data: Record<string, unknown>) {
-	let expandedPayload = templatePayload;
+	let expandedPayload = prepareTemplatePayload(templatePayload, data);
 
 	for (let index = 0; index < maxTemplateExpansionPasses; index += 1) {
-		const template = new ACData.Template(normalizeTemplateExpressions(expandedPayload));
+		const templatePayload =
+			"icon" in data ? restoreIconTemplateReferences(expandedPayload) : expandedPayload;
+		const template = new ACData.Template(templatePayload);
 		const nextPayload = template.expand({
 			$root: data,
 		});
@@ -375,6 +778,94 @@ async function findCardRow(db: D1Database, cardName: string) {
 		.first<CardRow>();
 }
 
+async function findSubmissionRow(db: D1Database, submissionId: string) {
+	return db
+		.prepare(
+			`
+				SELECT *
+				FROM submissions
+				WHERE "ID" = ?
+				LIMIT 1
+			`,
+		)
+		.bind(submissionId)
+		.first<SubmissionRow>();
+}
+
+async function ensureSubmissionsTable(db: D1Database) {
+	const table = await db
+		.prepare(
+			`
+				SELECT name
+				FROM sqlite_master
+				WHERE type = 'table' AND name = 'submissions'
+				LIMIT 1
+			`,
+		)
+		.first<{ name: string }>();
+
+	if (!table) {
+		await db
+			.prepare(
+				`
+					CREATE TABLE submissions (
+						ID TEXT PRIMARY KEY,
+						payment TEXT NOT NULL
+					)
+				`,
+			)
+			.run();
+
+		return;
+	}
+
+	const columns = await db.prepare(`PRAGMA table_info("submissions")`).all<{ name: string }>();
+	const hasPaymentColumn = (columns.results ?? []).some(
+		(column) => column.name.toLowerCase() === "payment",
+	);
+
+	if (!hasPaymentColumn) {
+		await db.prepare(`ALTER TABLE submissions ADD COLUMN payment TEXT`).run();
+	}
+}
+
+async function insertPaymentSubmission(db: D1Database, data: SubmittedCardData, payment: unknown) {
+	await ensureSubmissionsTable(db);
+
+	const id = createId();
+	const columns = shapeSubmissionColumns(data);
+
+	await db
+		.prepare(
+			`
+				INSERT INTO submissions (
+					"ID",
+					"Member Number",
+					"First Name",
+					"Last Name",
+					"Amount",
+					"Message",
+					"Email",
+					"Payment"
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			`,
+		)
+		.bind(
+			id,
+			columns.memberNumber ?? null,
+			columns.firstName ?? null,
+			columns.lastName ?? null,
+			columns.amount ?? null,
+			columns.message ?? null,
+			columns.email ?? null,
+			JSON.stringify(payment),
+		)
+		.run();
+
+	return id;
+}
+
 function getCardNameFromRequest(c: AppContext) {
 	return (
 		c.req.param("cardName") ||
@@ -383,6 +874,68 @@ function getCardNameFromRequest(c: AppContext) {
 		c.req.query("name") ||
 		""
 	).trim();
+}
+
+async function getExpandedCard(
+	db: D1Database,
+	variablesBucket: R2Bucket | undefined,
+	cardName: string,
+	extraData: Record<string, unknown> = {},
+) {
+	const row = await findCardRow(db, cardName);
+
+	if (!row) {
+		return { error: "Card was not found", status: 404 } as const;
+	}
+
+	const templatePayload = parseMaybeJson(row.payload);
+
+	if (!looksLikeCardPayload(templatePayload)) {
+		return {
+			error: "Stored card payload is not a valid Adaptive Card JSON payload",
+			status: 422,
+		} as const;
+	}
+
+	const bindingSpecs = getBindingSpecs(row.data);
+	const templateBindingSpecs = getTemplateBindingSpecs(templatePayload, bindingSpecs);
+	const data = await getBindingData(db, variablesBucket, bindingSpecs);
+	const templateData = await getBindingData(db, variablesBucket, templateBindingSpecs);
+	Object.assign(data, templateData, extraData);
+
+	let card: unknown;
+
+	try {
+		card = resolveCardIcons(expandCardTemplate(templatePayload, data));
+	} catch (error) {
+		return {
+			error:
+				error instanceof Error
+					? `Adaptive Card template expansion failed: ${error.message}`
+					: "Adaptive Card template expansion failed",
+			status: 422,
+		} as const;
+	}
+
+	const unresolvedBindings = Array.from(getUnresolvedBindings(card)).filter(
+		(binding) => binding !== "fallback",
+	);
+
+	if (unresolvedBindings.length > 0) {
+		return {
+			error: `Missing data bindings: ${unresolvedBindings.join(", ")}`,
+			status: 422,
+		} as const;
+	}
+
+	if (!looksLikeCardPayload(card)) {
+		return {
+			error: "Expanded card payload is not a valid Adaptive Card JSON payload",
+			status: 422,
+		} as const;
+	}
+
+	return { card, status: 200 } as const;
 }
 
 async function getCard(c: AppContext) {
@@ -403,71 +956,13 @@ async function getCard(c: AppContext) {
 	}
 
 	try {
-		const row = await findCardRow(db, cardName);
-		if (row) {
-			const templatePayload = parseMaybeJson(row.payload);
+		const result = await getExpandedCard(db, variablesBucket, cardName);
 
-			if (!looksLikeCardPayload(templatePayload)) {
-				return c.json(
-					{
-						error: "Stored card payload is not a valid Adaptive Card JSON payload",
-					},
-					422,
-				);
-			}
-
-			const bindingSpecs = getBindingSpecs(row.data);
-			const templateBindingSpecs = getTemplateBindingSpecs(templatePayload, bindingSpecs);
-			const data = await getBindingData(db, variablesBucket, bindingSpecs);
-			const templateData = await getBindingData(db, variablesBucket, templateBindingSpecs);
-			Object.assign(data, templateData);
-			let card: unknown;
-
-			try {
-				card = expandCardTemplate(templatePayload, data);
-			} catch (error) {
-				return c.json(
-					{
-						error:
-							error instanceof Error
-								? `Adaptive Card template expansion failed: ${error.message}`
-								: "Adaptive Card template expansion failed",
-					},
-					422,
-				);
-			}
-
-			const unresolvedBindings = Array.from(getUnresolvedBindings(card)).filter(
-				(binding) => binding !== "fallback",
-			);
-
-			if (unresolvedBindings.length > 0) {
-				return c.json(
-					{
-						error: `Missing data bindings: ${unresolvedBindings.join(", ")}`,
-					},
-					422,
-				);
-			}
-
-			if (!looksLikeCardPayload(card)) {
-				return c.json(
-					{
-						error: "Expanded card payload is not a valid Adaptive Card JSON payload",
-					},
-					422,
-				);
-			}
-
-			return c.json({ card });
+		if ("card" in result) {
+			return c.json({ card: result.card });
 		}
 
-		return c.json(
-			{
-				error: "Card was not found",
-			},
-			404,
-		);
+		return c.json({ error: result.error }, result.status);
 	} catch {
 		return c.json(
 			{
@@ -478,7 +973,108 @@ async function getCard(c: AppContext) {
 	}
 }
 
-App.get("/api", getCard);
-App.get("/api/:cardName", getCard);
+async function submitCard(c: AppContext) {
+	const cardName = getCardNameFromRequest(c);
+	const db = c.env.adaptive_cards;
+	const contentLength = Number(c.req.header("content-length") ?? 0);
 
-export default App;
+	if (!cardName) {
+		return c.json({ error: "Missing card search term" }, 400);
+	}
+
+	if (cardName !== "payment-tracking") {
+		return c.json({ error: "Submissions are only configured for payment-tracking" }, 400);
+	}
+
+	if (!db) {
+		return c.json({ error: "Card database is not configured" }, 500);
+	}
+
+	if (contentLength > maxSubmissionBytes) {
+		return c.json({ error: "Submission payload is too large" }, 413);
+	}
+
+	let body: unknown;
+
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "Submission must be valid JSON" }, 400);
+	}
+
+	if (!isObject(body) || !isObject(body.data)) {
+		return c.json({ error: "Submission data is missing" }, 400);
+	}
+
+	const payment = shapePaymentSubmission(body.data);
+
+	if (!hasPaymentSubmissionData(payment)) {
+		return c.json({ error: "Submission does not contain payment data" }, 400);
+	}
+
+	try {
+		const id = await insertPaymentSubmission(db, body.data, payment);
+
+		return c.json({ id, ok: true }, 201);
+	} catch {
+		return c.json({ error: "Failed to store submission" }, 500);
+	}
+}
+
+async function lookupPaymentDetailsCard(c: AppContext) {
+	const submissionId = (c.req.param("submissionId") || "").trim();
+	const db = c.env.adaptive_cards;
+	const variablesBucket = c.env.adaptive_card_variables;
+
+	if (!submissionId) {
+		return c.json({ error: "Missing submission ID" }, 400);
+	}
+
+	if (submissionId.length > 128) {
+		return c.json({ error: "Submission ID is too long" }, 400);
+	}
+
+	if (!db) {
+		return c.json({ error: "Card database is not configured" }, 500);
+	}
+
+	try {
+		const row = await findSubmissionRow(db, submissionId);
+
+		if (!row) {
+			return c.json({ error: "Submission was not found" }, 404);
+		}
+
+		const result = await getExpandedCard(
+			db,
+			variablesBucket,
+			paymentDetailsCardName,
+			shapeSubmissionLookupData(row),
+		);
+
+		if ("card" in result) {
+			return c.json({ card: result.card });
+		}
+
+		return c.json({ error: result.error }, result.status);
+	} catch {
+		return c.json({ error: "Failed to load payment details card" }, 500);
+	}
+}
+
+function serveClientApp(c: AppContext) {
+	const submissionId = (c.req.param("submissionId") || "").trim();
+	const url = new URL(c.req.url);
+	url.pathname = "/";
+	url.search = submissionId ? `?lookup=${encodeURIComponent(submissionId)}` : "";
+
+	return c.redirect(url.toString(), 302);
+}
+
+app.get("/api", getCard);
+app.get("/api/lookup/:submissionId", lookupPaymentDetailsCard);
+app.get("/api/:cardName", getCard);
+app.post("/api/:cardName/submissions", submitCard);
+app.get("/lookup/:submissionId", serveClientApp);
+
+export default app;

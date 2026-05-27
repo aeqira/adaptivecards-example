@@ -7,20 +7,27 @@ type CardResponse = {
   error?: string;
 };
 
-type JsonObject = Record<string, unknown>;
-
-const targetWidthClassNames: Record<string, string> = {
-  "AtLeast:Narrow": "ac-target-at-least-narrow",
-  "AtLeast:Standard": "ac-target-at-least-standard",
-  "AtLeast:Wide": "ac-target-at-least-wide",
-  "AtMost:Narrow": "ac-target-at-most-narrow",
-  "AtMost:Standard": "ac-target-at-most-standard",
-  "AtMost:Wide": "ac-target-at-most-wide",
-  Narrow: "ac-target-narrow",
-  Standard: "ac-target-standard",
-  VeryNarrow: "ac-target-very-narrow",
-  Wide: "ac-target-wide",
+type SubmitResponse = {
+  error?: string;
+  id?: string;
+  ok?: boolean;
 };
+
+type JsonObject = Record<string, unknown>;
+type TargetWidthBucket = "VeryNarrow" | "Narrow" | "Standard" | "Wide";
+type CardRoute =
+  | {
+      apiPath: string;
+      cardName: string;
+      label: string;
+      submitCardName: string;
+    }
+  | {
+      apiPath: string;
+      cardName: "payment-details";
+      label: string;
+      submitCardName: "payment-details";
+    };
 
 const targetWidthBreakpoints = {
   narrow: 320,
@@ -28,7 +35,7 @@ const targetWidthBreakpoints = {
   wide: 1200,
 };
 
-const targetWidthOrder = ["VeryNarrow", "Narrow", "Standard", "Wide"] as const;
+const targetWidthOrder: TargetWidthBucket[] = ["VeryNarrow", "Narrow", "Standard", "Wide"];
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -45,41 +52,12 @@ function normalizeCardPayload(value: unknown): JsonObject | null {
 
   return {
     type: "AdaptiveCard",
-    version: "1.5",
+    version: "1.6",
     ...value,
   };
 }
 
-function applySizingFix(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value
-      .map(applySizingFix)
-      .filter((item) => item !== null);
-  }
-
-  if (!isObject(value)) {
-    return value;
-  }
-
-  const fixedValue = Object.fromEntries(
-    Object.entries(value).map(([key, childValue]) => [key, applySizingFix(childValue)]),
-  );
-
-  if (typeof fixedValue.targetWidth === "string") {
-    const normalizedTargetWidth = normalizeTargetWidth(fixedValue.targetWidth);
-    const className = normalizedTargetWidth
-      ? targetWidthClassNames[normalizedTargetWidth]
-      : undefined;
-
-    if (className && typeof fixedValue.customCssSelector !== "string") {
-      fixedValue.customCssSelector = className;
-    }
-  }
-
-  return fixedValue;
-}
-
-function getTargetWidthBucket(width: number) {
+function getTargetWidthBucket(width: number): TargetWidthBucket {
   if (width <= targetWidthBreakpoints.narrow) {
     return "VeryNarrow";
   }
@@ -102,13 +80,12 @@ function normalizeTargetWidth(targetWidth: string) {
     return null;
   }
 
-  const widthNames: Record<string, string> = {
+  const widthNames: Record<string, TargetWidthBucket> = {
     narrow: "Narrow",
     standard: "Standard",
     verynarrow: "VeryNarrow",
     wide: "Wide",
   };
-
   const widthName = widthNames[(rawWidth ?? rawPrefix).toLowerCase()];
 
   if (!widthName) {
@@ -139,34 +116,27 @@ function targetWidthMatches(targetWidth: string, width: number) {
     return true;
   }
 
-  const bucket = getTargetWidthBucket(width);
-  const bucketIndex = targetWidthOrder.indexOf(bucket);
+  const bucketIndex = targetWidthOrder.indexOf(getTargetWidthBucket(width));
 
   if (normalizedTargetWidth.startsWith("AtLeast:")) {
-    return (
-      bucketIndex >=
-      targetWidthOrder.indexOf(
-        normalizedTargetWidth.slice("AtLeast:".length) as (typeof targetWidthOrder)[number],
-      )
-    );
+    const targetBucket = normalizedTargetWidth.slice("AtLeast:".length) as TargetWidthBucket;
+
+    return bucketIndex >= targetWidthOrder.indexOf(targetBucket);
   }
 
   if (normalizedTargetWidth.startsWith("AtMost:")) {
-    return (
-      bucketIndex <=
-      targetWidthOrder.indexOf(
-        normalizedTargetWidth.slice("AtMost:".length) as (typeof targetWidthOrder)[number],
-      )
-    );
+    const targetBucket = normalizedTargetWidth.slice("AtMost:".length) as TargetWidthBucket;
+
+    return bucketIndex <= targetWidthOrder.indexOf(targetBucket);
   }
 
-  return normalizedTargetWidth === bucket;
+  return normalizedTargetWidth === getTargetWidthBucket(width);
 }
 
-function filterTargetWidths(value: unknown, width: number): unknown {
+function applyScreenSizeConstraints(value: unknown, width: number): unknown {
   if (Array.isArray(value)) {
     return value
-      .map((item) => filterTargetWidths(item, width))
+      .map((item) => applyScreenSizeConstraints(item, width))
       .filter((item) => item !== null);
   }
 
@@ -181,51 +151,94 @@ function filterTargetWidths(value: unknown, width: number): unknown {
     return null;
   }
 
-  const filteredValue = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries(value)
       .filter(([key]) => key !== "targetWidth")
-      .map(([key, childValue]) => [key, filterTargetWidths(childValue, width)])
+      .map(([key, childValue]) => [key, applyScreenSizeConstraints(childValue, width)])
       .filter(([, childValue]) => childValue !== null),
   );
-
-  return filteredValue;
 }
 
-function getCardNameFromUrl() {
+function getCardRouteFromUrl(): CardRoute {
   const url = new URL(window.location.href);
+  const lookupId = url.searchParams.get("lookup");
+
+  if (lookupId) {
+    return {
+      apiPath: `/api/lookup/${encodeURIComponent(lookupId)}`,
+      cardName: "payment-details",
+      label: `payment-details for ${lookupId}`,
+      submitCardName: "payment-details",
+    };
+  }
+
   const queryCardName =
     url.searchParams.get("card") ?? url.searchParams.get("q") ?? url.searchParams.get("name");
 
   if (queryCardName) {
-    return queryCardName;
+    return {
+      apiPath: `/api/${encodeURIComponent(queryCardName)}`,
+      cardName: queryCardName,
+      label: queryCardName,
+      submitCardName: queryCardName,
+    };
   }
 
   const pathSegments = url.pathname
     .split("/")
     .filter(Boolean)
     .filter((segment) => segment !== "api");
-  const pathCardName = pathSegments[pathSegments.length - 1];
 
-  return pathCardName ?? "member-payment";
+  if (pathSegments[0] === "lookup" && pathSegments[1]) {
+    const submissionId = pathSegments[1];
+
+    return {
+      apiPath: `/api/lookup/${encodeURIComponent(submissionId)}`,
+      cardName: "payment-details",
+      label: `payment-details for ${submissionId}`,
+      submitCardName: "payment-details",
+    };
+  }
+
+  const pathCardName = pathSegments[pathSegments.length - 1];
+  const cardName = pathCardName ?? "member-payment";
+
+  return {
+    apiPath: `/api/${encodeURIComponent(cardName)}`,
+    cardName,
+    label: cardName,
+    submitCardName: cardName,
+  };
 }
 
 function App() {
-  const [cardName] = useState(getCardNameFromUrl);
+  const [cardRoute] = useState(getCardRouteFromUrl);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [layoutWidth, setLayoutWidth] = useState(window.innerWidth);
   const [renderedCard, setRenderedCard] = useState<HTMLElement | null>(null);
+  const [submitMessage, setSubmitMessage] = useState<string | null>(null);
   const cardContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const container = cardContainerRef.current;
+
     function updateLayoutWidth() {
-      setLayoutWidth(cardContainerRef.current?.clientWidth ?? window.innerWidth);
+      setLayoutWidth(container?.clientWidth ?? window.innerWidth);
     }
 
     updateLayoutWidth();
-    window.addEventListener("resize", updateLayoutWidth);
 
-    return () => window.removeEventListener("resize", updateLayoutWidth);
+    if (!container || typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateLayoutWidth);
+
+      return () => window.removeEventListener("resize", updateLayoutWidth);
+    }
+
+    const observer = new ResizeObserver(updateLayoutWidth);
+    observer.observe(container);
+
+    return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
@@ -233,29 +246,62 @@ function App() {
       setError(null);
       setIsLoading(true);
       setRenderedCard(null);
+      setSubmitMessage(null);
 
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 10_000);
 
-      const response = await fetch(`/api/${encodeURIComponent(cardName)}`, {
+      const response = await fetch(cardRoute.apiPath, {
         signal: controller.signal,
       });
       window.clearTimeout(timeout);
 
       const data = (await response.json()) as CardResponse;
       if (!response.ok) {
-        throw new Error(data.error ?? `Failed to load adaptive card "${cardName}"`);
+        throw new Error(data.error ?? `Failed to load adaptive card "${cardRoute.cardName}"`);
       }
 
       const cardPayload = normalizeCardPayload(data.card);
       if (!cardPayload) {
-        throw new Error(`Adaptive card "${cardName}" is not an AdaptiveCard payload`);
+        throw new Error(`Adaptive card "${cardRoute.cardName}" is not an AdaptiveCard payload`);
       }
 
       const adaptiveCard = new AdaptiveCards.AdaptiveCard();
-      const sizedCardPayload = filterTargetWidths(cardPayload, layoutWidth);
+      const constrainedCardPayload = applyScreenSizeConstraints(cardPayload, layoutWidth);
 
-      adaptiveCard.parse(applySizingFix(sizedCardPayload));
+      adaptiveCard.onExecuteAction = (action) => {
+        if (!(action instanceof AdaptiveCards.SubmitAction)) {
+          return;
+        }
+
+        const submission = action.data;
+        setSubmitMessage("Submitting...");
+
+        fetch(`/api/${encodeURIComponent(cardRoute.submitCardName)}/submissions`, {
+          body: JSON.stringify({
+            data: submission,
+          }),
+          headers: {
+            "Content-Type": "application/json",
+          },
+          method: "POST",
+        })
+          .then(async (response) => {
+            const result = (await response.json()) as SubmitResponse;
+
+            if (!response.ok) {
+              throw new Error(result.error ?? "Failed to submit card data");
+            }
+
+            setSubmitMessage(result.id ? `Submitted ${result.id}` : "Submitted");
+          })
+          .catch((error: unknown) => {
+            setSubmitMessage(null);
+            setError(error instanceof Error ? error.message : "Failed to submit card data");
+          });
+      };
+
+      adaptiveCard.parse(constrainedCardPayload);
 
       const validationResults = adaptiveCard.validateProperties();
       if (validationResults.validationEvents.length > 0) {
@@ -263,16 +309,16 @@ function App() {
           .map((event) => event.message)
           .join("; ");
 
-        throw new Error(`Adaptive card "${cardName}" is invalid: ${validationMessage}`);
+        throw new Error(`Adaptive card "${cardRoute.cardName}" is invalid: ${validationMessage}`);
       }
 
       const renderedCard = adaptiveCard.render();
       if (!renderedCard) {
-        throw new Error(`Unable to render adaptive card "${cardName}"`);
+        throw new Error(`Unable to render adaptive card "${cardRoute.cardName}"`);
       }
 
       if (!renderedCard.textContent?.trim() && renderedCard.children.length === 0) {
-        throw new Error(`Adaptive card "${cardName}" rendered with no visible content`);
+        throw new Error(`Adaptive card "${cardRoute.cardName}" rendered with no visible content`);
       }
 
       setRenderedCard(renderedCard);
@@ -288,7 +334,7 @@ function App() {
 
       setError(error instanceof Error ? error.message : "Failed to load adaptive card");
     });
-  }, [cardName, layoutWidth]);
+  }, [cardRoute, layoutWidth]);
 
   useEffect(() => {
     const container = cardContainerRef.current;
@@ -307,8 +353,9 @@ function App() {
   return (
     <main>
       <h1>Adaptive Card</h1>
-      <p className="source">Search term: {cardName}</p>
+      <p className="source">Search term: {cardRoute.label}</p>
       {isLoading && <p className="source">Loading card...</p>}
+      {submitMessage && <p className="source">{submitMessage}</p>}
       {error && <p role="alert">{error}</p>}
       <div ref={cardContainerRef} id="adaptive-card" />
     </main>
